@@ -1,0 +1,17 @@
+if(ctx._source[params['inline']] != null){
+	boolean found = false; 
+	for(int i=0; i< ctx._source[params['inline']].length; i++){
+		if (ctx._source[params['inline']][i][params['pk']] == params['obj'][params['pk']]){ 
+			ctx._source[params['inline']][i] = params['obj']; 
+			found = true; 
+			break; 
+		}
+	} 
+	if (!found){ 
+		ctx._source[params['inline']].add(params['obj'])
+	}
+} else {
+	// ctx._source[params['parent']] = ctx._d;
+	// ctx.op = "update";  [updte | noop | delete]
+	ctx._source[params['inline']] = [params['obj']];
+}

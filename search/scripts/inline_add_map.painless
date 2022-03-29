@@ -1,0 +1,6 @@
+if(ctx._source[params['inline']] == null){
+	Map empty = [:]; 
+	ctx._source[params['inline']] = empty;
+}
+String key = String.valueOf(params['obj'][params['pk']]);
+ctx._source[params['inline']][key] = params['obj'];

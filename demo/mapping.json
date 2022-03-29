@@ -1,0 +1,45 @@
+{
+    "mappings": {
+        "_routing": {
+            "required": true
+        },
+        "properties": {
+            "id": { "type": "keyword", "ignore_above": 256, "index": false },
+            "docType": { "type": "keyword", "ignore_above": 256 },
+            "date": { "type": "date" },
+            "deleted": { "type": "boolean" },
+            "inlined_field": {
+                "type": "nested",
+                "properties": {
+                    "id": { "type": "keyword", "ignore_above": 256 },
+                    "value": { "type": "keyword", "ignore_above": 256, "index": false }
+                }
+            },
+	    "child_doc_field": { "type": "keyword"},
+            "nested": {
+                "type": "nested",
+                "properties": {
+                    "key": { "type": "keyword"},
+                    "name": { "type": "keyword"},
+                    "value": { "type": "double" }
+                }
+            },
+            "noindex": { "type": "keyword", "index": false },
+            "text": { "type": "keyword"},
+            "text_array": { "type": "keyword"},
+            "join": {
+                "type": "join",
+                "relations": {
+                    "immaparent": "immachild"
+                }
+            }
+        }
+    },
+    "settings": {
+        "index": {
+            "number_of_shards": "5",
+            "number_of_replicas": "0",
+            "max_ngram_diff": 255
+        }
+    }
+}

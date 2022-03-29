@@ -1,0 +1,17 @@
+if(ctx._source[params['inline']] == null){
+	ctx.op = "noop";
+	return
+}
+
+int found = -1; 
+for(int i=0; i< ctx._source[params['inline']].length; i++){
+	if (ctx._source[params['inline']][i][params['pk']] == params['obj'][params['pk']]){ 
+		found = i; 
+		break; 
+	}
+} 
+if (found != -1){ 
+	ctx._source[params['inline']].remove(found)
+} else {
+	ctx.op = "noop";
+}
