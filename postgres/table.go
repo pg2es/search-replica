@@ -24,10 +24,8 @@ type Table struct {
 
 	index      bool
 	indexAll   bool // index all columns by default
-	noid       bool // skip _id field generation
 	upsertOnly bool // without old PKs / _routing in WAL, proper update & delete is impossible
-
-	tagParsed bool
+	tagParsed  bool
 
 	pkCol      *Column // used in scripting and `_id`
 	pkNoPrefix bool    // use raw field instead of {table}_{pk}

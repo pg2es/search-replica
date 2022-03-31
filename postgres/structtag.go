@@ -23,8 +23,8 @@ func (t *Table) parseStructTag(tag string) error {
 }
 
 func (t *Table) parseJoinTag(tags conftags.Tags) error {
-	tag, _ := tags.Get("join") // only one join is allowed per document.
-	if tag == nil {            // however multiple relations allowed per index.
+	tag := tags.Get("join") // only one join is allowed per document.
+	if tag == nil {         // however multiple relations allowed per index.
 		return nil
 	}
 
@@ -35,7 +35,7 @@ func (t *Table) parseJoinTag(tags conftags.Tags) error {
 	}
 
 	if tag.Values[0] != "" {
-		t.join.fieldName = tag.Name
+		t.join.fieldName = tag.Values[0]
 	}
 	if len(tag.Values) > 1 {
 		t.join.typeName = tag.Values[1]
@@ -68,23 +68,23 @@ func (t *Table) parseInlineTags(tags conftags.Tags) error {
 }
 
 func (t *Table) parseIndexTag(tags conftags.Tags) error {
-	iTag, _ := tags.Get("index")
-	if iTag == nil {
+	tag := tags.Get("index")
+	if tag == nil {
 		return nil // Tag does not exists. Nothing to change
 	}
 
 	// `index:"-"` means skip this table
-	if iTag.Values[0] == "-" {
+	if tag.Values[0] == "-" {
 		t.index = false
 		// t.docType = ""
 		return nil
 	}
 
-	if iTag.Values[0] != "" {
-		t.docType = iTag.Name
+	if tag.Values[0] != "" {
+		t.docType = tag.Values[0]
 	}
 
-	for _, opt := range iTag.Values[1:] {
+	for _, opt := range tag.Values[1:] {
 		switch opt {
 		case "all":
 			t.indexAll = true
@@ -147,14 +147,14 @@ func (col *Column) parseInlineTags(tags conftags.Tags) error {
 }
 
 func (col *Column) parseIndexTag(tags conftags.Tags) error {
-	tag, _ := tags.Get("index")
+	tag := tags.Get("index")
 	if tag == nil {
 		return nil // Tag does not exists. Nothing to change
 	}
 	col.index = true
 
 	if tag.Values[0] != "" {
-		col.fieldName = tag.Name
+		col.fieldName = tag.Values[0]
 	}
 
 	for _, opt := range tag.Values[1:] {
@@ -178,7 +178,7 @@ func (col *Column) parseIndexTag(tags conftags.Tags) error {
 }
 
 func (col *Column) parseJoinTag(tags conftags.Tags) error {
-	tag, _ := tags.Get("join")
+	tag := tags.Get("join")
 	if tag == nil {
 		return nil // Tag does not exists. Nothing to change
 	}

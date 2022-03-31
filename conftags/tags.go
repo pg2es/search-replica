@@ -39,18 +39,24 @@ func (tags Tags) Filter(name string) (result Tags) {
 	return result
 }
 
-func (tags Tags) Get(name string) (tag *Tag, ok bool) {
+// returns tag if found, otherwise returns nil
+func (tags Tags) Get(name string) *Tag {
 	for _, tag := range tags {
 		if tag.Name == name {
-			return tag, true
+			return tag
 		}
 	}
-	return nil, false
+	return nil
 }
 
 var errSyntax = errors.New("syntax error")
 
 // Parse is modified reflect.StructTag.Lookup. Check original method for explanation
+// Changes:
+// - all tags are parsed and stored in list of tags (even duplicates);
+// - if there are 3 or more spaces in between tags, rest of a string is considered as comment;
+// - now it returns syntax error
+
 func (tags *Tags) Parse(src string) error {
 	for src != "" {
 		// Skip leading space.
