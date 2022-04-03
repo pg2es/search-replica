@@ -53,7 +53,7 @@ func (kv stringKV) jsonKey() string {
 	return kv.key
 }
 
-func (kv stringKV) jsonFromRow([][]byte) ([]byte, error) {
+func (kv stringKV) MarshalJSON() ([]byte, error) {
 	return []byte(strconv.Quote(kv.value)), nil // TODO proper marshaling
 }
 
@@ -74,7 +74,6 @@ type jsonKV interface {
 // document represents json document, that would be sent to search.
 // attempts to split table config from data.
 type document struct {
-	row    [][]byte // raw database row
 	fields []jsonKV // table fields
 }
 
@@ -83,10 +82,6 @@ func (v document) MarshalJSON() ([]byte, error) {
 	w := jwriter.Writer{}
 	v.MarshalEasyJSON(&w)
 	return w.Buffer.BuildBytes(), w.Error
-}
-
-type jsonRowReader interface {
-	jsonFromRow([][]byte) ([]byte, error)
 }
 
 // MarshalEasyJSON supports easyjson.Marshaler interface
@@ -100,9 +95,7 @@ func (v document) MarshalEasyJSON(out *jwriter.Writer) {
 		out.String(col.jsonKey())
 		out.RawByte(':')
 
-		if m, ok := col.(jsonRowReader); ok {
-			out.Raw(m.jsonFromRow(v.row))
-		} else if m, ok := col.(easyjson.Marshaler); ok {
+		if m, ok := col.(easyjson.Marshaler); ok {
 			m.MarshalEasyJSON(out)
 		} else if m, ok := col.(json.Marshaler); ok {
 			out.Raw(m.MarshalJSON())

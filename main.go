@@ -142,6 +142,10 @@ func main() {
 		db.DropReplicationSlot(ctx)
 		pgSlotCreate = true
 	}
+	// During slot creation, Postgres also make a spanshot of a database. Freezeng a state for the following COPY command  or backup. Snapshot is available within this transaction.
+	if err := db.Tx(ctx); err != nil {
+		logger.Fatal("start transaction", zap.Error(err))
+	}
 	if pgSlotCreate {
 		db.CreateReplicationSlot(ctx)
 	}
@@ -149,13 +153,19 @@ func main() {
 	startAt := pglogrepl.LSN(0) //Zero value means: Get last commited position for this slot from master
 	if reindex {
 		logger.Info("REINDEX")
-		startAt = db.GetCurrentLSN(ctx)
-		err := db.Reindex(ctx) // blocking
+		err := db.Reindex(ctx) // blocking; should be called in same transaction as slot creation
 		if err != nil {
 			log.Fatal(err)
 		}
 	}
 
+	// Since we do not need snapshot anymore, we can commit the transaction.
+	// And we need to do so, because streaming replication is not possible within a transaction.
+	if err := db.Commit(ctx); err != nil {
+		logger.Fatal("commit transaction", zap.Error(err))
+	}
+
+	// TODO: move to metrics
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()

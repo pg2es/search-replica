@@ -29,35 +29,34 @@ func pgconnConfig() (*pgconn.Config, error) {
 }
 
 // Connect makes two connections to DB for discovery and replication
-func (d *Database) Connect(ctx context.Context) error {
+func (db *Database) Connect(ctx context.Context) error {
 	config, err := pgconnConfig()
 	if err != nil {
 		return err
 	}
-	d.name = config.Database // By default database name == index name
+	db.name = config.Database // By default database name == index name
 
 	// "replication" key should not be defined for regular (query) connection.
 	// this connection is required for discovery and initial feetching data
 	// Since in physical or logical replication mode, only the simple query protocol can be used, which is not sufficient in this case.
 	delete(config.RuntimeParams, "replication")
-	if d.queryConn, err = pgconn.ConnectConfig(ctx, config); err != nil {
+	if db.queryConn, err = pgconn.ConnectConfig(ctx, config); err != nil {
 		return errors.Wrap(err, "can not connect")
 	}
 
 	// See: https://www.postgresql.org/docs/14/libpq-connect.html#LIBPQ-CONNECT-REPLICATION
 	// Following parameter switch connection into logical replication mode.
 	config.RuntimeParams["replication"] = "database"
-	if d.replConn, err = pgconn.ConnectConfig(ctx, config); err != nil {
+	if db.replConn, err = pgconn.ConnectConfig(ctx, config); err != nil {
 		return errors.Wrap(err, "can not connect")
 	}
 
-	log.Printf("Connected to DB %s", d.name)
-
+	db.logger.Info("Connected to DB")
 	return nil
 }
 
 // newConn for `select *` queries. ( for -reindex ). Do not forget to close it.
-func (d *Database) newConn(ctx context.Context) (conn *pgconn.PgConn, err error) {
+func (db *Database) newConn(ctx context.Context) (conn *pgconn.PgConn, err error) {
 	config, _ := pgconnConfig()
 	delete(config.RuntimeParams, "replication")
 	conn, err = pgconn.ConnectConfig(ctx, config)
@@ -77,11 +76,26 @@ func (db *Database) Close(ctx context.Context) error {
 }
 
 func (db *Database) CreateReplicationSlot(ctx context.Context) {
-	opts := pglogrepl.CreateReplicationSlotOptions{Temporary: false}
-	if _, err := pglogrepl.CreateReplicationSlot(ctx, db.replConn, db.SlotName, OutputPlugin, opts); err != nil {
+	opts := pglogrepl.CreateReplicationSlotOptions{
+		Temporary:      false,
+		SnapshotAction: "USE_SNAPSHOT",
+		Mode:           pglogrepl.LogicalReplication,
+	}
+	_, err := pglogrepl.CreateReplicationSlot(ctx, db.replConn, db.SlotName, OutputPlugin, opts)
+	if err != nil {
 		db.logger.Error("failed to create replication slot", zap.String("slot", db.SlotName), zap.Error(err))
+		return
 	}
 	db.logger.Info("created replication slot", zap.String("slot", db.SlotName))
+	return
+}
+
+func (db *Database) Tx(ctx context.Context) error {
+	return db.replConn.Exec(ctx, "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ").Close()
+}
+
+func (db *Database) Commit(ctx context.Context) error {
+	return db.replConn.Exec(ctx, "COMMIT").Close()
 }
 
 func (db *Database) DropReplicationSlot(ctx context.Context) {
@@ -108,9 +122,9 @@ func (db *Database) GetCurrentLSN(ctx context.Context) pglogrepl.LSN {
 
 func (db *Database) StartReplication(ctx context.Context, at pglogrepl.LSN) error {
 	pluginArguments := []string{
+		"binary 'true'", // TODO: Add binary for PG14+
 		"proto_version '1'",
 		"publication_names '" + db.Publication + "'", // TODO: escape pgPublication
-		// "binary 'true'" 							  // TODO: Add binary for PG14+
 	}
 
 	opts := pglogrepl.StartReplicationOptions{PluginArgs: pluginArguments}
@@ -231,17 +245,17 @@ func (db *Database) HandleLogical(ctx context.Context, lsn pglogrepl.LSN, msg pg
 
 	case *pglogrepl.InsertMessage:
 		table := db.Relation(v.RelationID)
-		row := rowFromPGTuple(v.Tuple)
 
+		table.decodeTuple(v.Tuple)
 		if table.index {
-			meta := must(table.elasticBulkHeader(ESIndex, row))
-			data := must(table.EncodeRowJSON(row))
+			meta := must(table.elasticBulkHeader(ESIndex))
+			data := must(table.MarshalJSON())
 			db.results <- Document{LSN: lsn, Meta: meta, Data: data}
 		}
 
 		for _, inl := range table.isInlinedIn {
-			meta, _ := inl.elasticBulkHeader(ESUpdate, row)
-			data, _ := inl.jsonAddScript(row)
+			meta, _ := inl.elasticBulkHeader(ESUpdate)
+			data, _ := inl.jsonAddScript()
 			db.results <- Document{LSN: lsn, Meta: meta, Data: data}
 		}
 
@@ -252,27 +266,28 @@ func (db *Database) HandleLogical(ctx context.Context, lsn pglogrepl.LSN, msg pg
 		// oldRow := rowFromPGTuple(v.OldTuple)
 		// if table.keysChanged(oldRow, row)
 		// }
-		row := rowFromPGTuple(v.NewTuple)
+
+		table.decodeTuple(v.NewTuple)
 
 		// XXX: ESUpdate is correct here, and would work fine assuming that data is consistent.
 		if table.index {
-			meta := must(table.elasticBulkHeader(ESUpdate, row))
-			data := must(table.EncodeUpdateRowJSON(row))
+			meta := must(table.elasticBulkHeader(ESUpdate))
+			data := must(table.EncodeUpdateRowJSON())
 			db.results <- Document{LSN: lsn, Meta: meta, Data: data}
 		}
 
 		for _, inl := range table.isInlinedIn {
-			meta := must(inl.elasticBulkHeader(ESUpdate, row))
-			data := must(inl.jsonAddScript(row))
+			meta := must(inl.elasticBulkHeader(ESUpdate))
+			data := must(inl.jsonAddScript())
 			db.results <- Document{LSN: lsn, Meta: meta, Data: data}
 		}
 
 	case *pglogrepl.DeleteMessage:
 		table := db.Relation(v.RelationID)
-		row := rowFromPGTuple(v.OldTuple)
+		table.decodeTuple(v.OldTuple)
 
 		if table.index && !table.upsertOnly {
-			meta := must(table.elasticBulkHeader(ESDelete, row))
+			meta := must(table.elasticBulkHeader(ESDelete))
 			db.results <- Document{LSN: lsn, Meta: meta}
 		}
 
@@ -280,14 +295,18 @@ func (db *Database) HandleLogical(ctx context.Context, lsn pglogrepl.LSN, msg pg
 			if inl.upsertOnly {
 				continue
 			}
-			meta := must(inl.elasticBulkHeader(ESUpdate, row))
-			data := must(inl.jsonDelScript(row))
+			meta := must(inl.elasticBulkHeader(ESUpdate))
+			data := must(inl.jsonDelScript())
 			db.results <- Document{LSN: lsn, Meta: meta, Data: data}
 		}
 
 	case *pglogrepl.TruncateMessage:
 		// TODO: Delete and recreate index, while preserving mapping.
-		log.Printf("not implemented message %s", msg.Type())
+		db.logger.Info(
+			"not implemented message %s",
+			zap.Stringer("type_name", msg.Type()),
+			zap.Uint8("type_code", uint8(msg.Type())),
+		)
 
 	case *pglogrepl.OriginMessage:
 		// skip. Useless for our case

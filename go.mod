@@ -27,3 +27,5 @@ require (
 )
 
 replace github.com/jackc/pgtype v1.10.1-0.20220329203659-75dc53c3e8c2 => github.com/pg2es/pgtype v1.10.1-0.20220329203659-75dc53c3e8c2
+
+replace github.com/jackc/pglogrepl v0.0.0-20210628224733-3140d41f7881 => github.com/pg2es/pglogrepl v0.0.0-20220403033012-e6ee500b61d2

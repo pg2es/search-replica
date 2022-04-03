@@ -43,6 +43,11 @@ func (i *Inline) init() {
 	if i.parentCol == nil {
 		i.logger.Fatal("parent column is not configured")
 	}
+
+	if i.pkCol == nil && i.source.pkCol != nil {
+		i.pkCol = i.source.pkCol
+		i.logger.Info("using implicit PK column")
+	}
 	if i.pkCol == nil {
 		i.logger.Fatal("PK column is not configured")
 	}
@@ -66,30 +71,30 @@ func (i *Inline) keysChanged(oldRow, newRow [][]byte) bool {
 	return false
 }
 
-func (i *Inline) elasticBulkHeader(action ESAction, row [][]byte) ([]byte, error) {
+func (i *Inline) elasticBulkHeader(action ESAction) ([]byte, error) {
 	header, payload := newHeader(ESUpdate) // Always Update
 
 	payload.Index = i.parent.indexName
-	payload.ID = i.parentCol.stringFromRow(row)
+	payload.ID = i.parentCol.string()
 	if !i.parent.pkNoPrefix {
 		payload.ID = i.parent.name + "_" + payload.ID
 	}
 	if i.routingCol != nil {
-		payload.Routing = i.routingCol.stringFromRow(row)
+		payload.Routing = i.routingCol.string()
 	}
 
 	return json.Marshal(header)
 }
 
-func (inline *Inline) jsonEncodeRow(buf *jwriter.Writer, row [][]byte) {
-	doc := document{row: row}
+func (inline *Inline) jsonEncodeRow(buf *jwriter.Writer) {
+	doc := document{}
 	for _, col := range inline.columns { // add real columns
 		doc.fields = append(doc.fields, col)
 	}
 	doc.MarshalEasyJSON(buf)
 }
 
-func (inline *Inline) jsonAddScript(row [][]byte) ([]byte, error) {
+func (inline *Inline) jsonAddScript() ([]byte, error) {
 	out := jwriter.Writer{}
 	out.RawString(`{"scripted_upsert":true,"script":{"id":`)
 	out.String(inline.scriptAddID)
@@ -97,7 +102,7 @@ func (inline *Inline) jsonAddScript(row [][]byte) ([]byte, error) {
 
 	// New object is passed as params
 	// XXX: maybe it makes sense to wrap values into additional params struct, so we can pass arguments there.
-	inline.jsonEncodeRow(&out, row)
+	inline.jsonEncodeRow(&out)
 
 	out.RawString(`,"pk":`)
 	out.String(inline.pk().name)
@@ -106,26 +111,30 @@ func (inline *Inline) jsonAddScript(row [][]byte) ([]byte, error) {
 	out.RawByte('}')
 
 	pCol := inline.parentCol
-	out.RawString(`},"upsert":{"docType":`)
+	out.RawString(`},`)
+
+	// default values for empty document with inlined field
+	// TODO: reuse from parent table or remove completely
+	out.RawString(`"upsert":{"docType":`)
+
 	out.String(inline.parent.name)
 	out.RawByte(',')
-
 	out.String(inline.parent.pkCol.name)
 	out.RawByte(':')
+	out.Raw(pCol.MarshalJSON())
 
-	out.Raw(pCol.jsonFromRow(row))
 	out.RawString(`}}`)
 
 	return out.Buffer.BuildBytes(), out.Error
 }
 
-func (inline *Inline) jsonDelScript(row [][]byte) ([]byte, error) {
+func (inline *Inline) jsonDelScript() ([]byte, error) {
 	out := jwriter.Writer{}
 	out.RawString(`{"script":{"id":`)
 	out.String(inline.scriptDelID)
 	out.RawString(`,"params":{"obj":`)
 
-	inline.jsonEncodeRow(&out, row)
+	inline.jsonEncodeRow(&out)
 
 	out.RawString(`,"pk":`)
 	out.String(inline.pk().name)

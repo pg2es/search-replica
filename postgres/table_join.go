@@ -16,17 +16,17 @@ func (tj *tableJoin) jsonKey() string {
 	return tj.fieldName
 }
 
-func (tj *tableJoin) jsonFromRow(row [][]byte) ([]byte, error) {
+func (tj *tableJoin) MarshalJSON() ([]byte, error) {
 	joinObj := documentJoin{
 		Name: tj.typeName,
 	}
 	if tj.nameCol != nil { // dynamic type from value
-		joinObj.Name = tj.nameCol.stringFromRow(row)
+		joinObj.Name = tj.nameCol.string()
 	}
 
 	// for child documents
 	if tj.parentCol != nil { // this doc is a child.
-		joinObj.Parent = tj.parentCol.stringFromRow(row)
+		joinObj.Parent = tj.parentCol.string()
 	}
 
 	return json.Marshal(joinObj)

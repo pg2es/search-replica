@@ -7,12 +7,13 @@ import (
 
 	"github.com/jackc/pglogrepl"
 	jwriter "github.com/mailru/easyjson/jwriter"
+	"github.com/pkg/errors"
 	"go.uber.org/zap"
 )
 
 type Table struct {
 	schema  *Schema            // RO
-	columns map[string]*Column // By name
+	columns map[string]*Column // all columns by name
 
 	inlines     []*Inline // inline name -> table which uses it. owns
 	isInlinedIn []*Inline // list of tables, this table `is inlined in`; We need to update in ES documents of those tables.
@@ -67,49 +68,62 @@ func (t *Table) keysChanged(oldRow, newRow [][]byte) bool {
 	return false
 }
 
-func (t *Table) elasticBulkHeader(action ESAction, row [][]byte) ([]byte, error) {
+func (t *Table) decodeRow(row [][]byte, dataType uint8) error {
+	for _, col := range t.IndexColumns() {
+		if err := col.decode(row[col.pos], dataType); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (t *Table) decodeTuple(tuple *pglogrepl.TupleData) error {
+	for _, col := range t.IndexColumns() {
+		if col.pos >= len(tuple.Columns) {
+			return errors.New("column out of range")
+		}
+		if err := col.decode(tuple.Columns[col.pos].Data, tuple.Columns[col.pos].DataType); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (t *Table) elasticBulkHeader(action ESAction) ([]byte, error) {
 	header, payload := newHeader(action)
 
 	payload.Index = t.indexName
-	payload.ID = t.pkCol.stringFromRow(row)
+	payload.ID = t.pkCol.string()
 	if !t.pkNoPrefix { // add document type prefix to ID, to avoid collisions
 		payload.ID = t.name + "_" + payload.ID
 	}
 	if t.routingCol != nil {
-		payload.Routing = t.routingCol.stringFromRow(row)
+		payload.Routing = t.routingCol.string()
 	}
 
 	return json.Marshal(header)
 }
 
-func rowFromPGTuple(tuple *pglogrepl.TupleData) [][]byte {
-	row := make([][]byte, len(tuple.Columns))
-	for i, tupleCol := range tuple.Columns {
-		row[i] = tupleCol.Data
-	}
-	return row
-}
-
-func (t *Table) EncodeRowJSON(row [][]byte) ([]byte, error) {
+func (t *Table) MarshalJSON() ([]byte, error) {
 	out := jwriter.Writer{}
-	t.jsonEncodeRow(&out, row)
+	t.jsonEncodeRow(&out)
 	return out.Buffer.BuildBytes(), out.Error
 }
 
 // EncodeUpdateRowJSON generates json.
 // during updates, new document should be wrapper into a {"doc": ... } object
-func (t *Table) EncodeUpdateRowJSON(row [][]byte) ([]byte, error) {
+func (t *Table) EncodeUpdateRowJSON() ([]byte, error) {
 	out := jwriter.Writer{}
 	out.RawString(`{"doc":`)
 
-	t.jsonEncodeRow(&out, row)
+	t.jsonEncodeRow(&out)
 
 	out.RawByte('}')
 	return out.Buffer.BuildBytes(), out.Error
 }
 
-func (t *Table) jsonEncodeRow(buf *jwriter.Writer, row [][]byte) {
-	doc := document{row: row}
+func (t *Table) jsonEncodeRow(buf *jwriter.Writer) {
+	doc := document{}
 	for _, col := range t.columns { // add real columns
 		if col.index {
 			doc.fields = append(doc.fields, col)
@@ -118,23 +132,13 @@ func (t *Table) jsonEncodeRow(buf *jwriter.Writer, row [][]byte) {
 	if t.join.enabled {
 		doc.fields = append(doc.fields, &t.join)
 	}
-	doc.fields = append(doc.fields, stringKV{
-		key: "docType", value: t.docType,
-	})
+	doc.fields = append(doc.fields, stringKV{key: "docType", value: t.docType})
 
 	doc.MarshalEasyJSON(buf)
 }
 
 // init: consistency checks and pre-encode caching
 func (t *Table) init() {
-	for _, inl := range t.isInlinedIn {
-		inl.init()
-	}
-
-	if !t.index { // Skip checks & setup for ignored tables
-		return
-	}
-
 	if t.pkCol == nil {
 		t.logger.Debug("PK is not configured. Fallback to implicit PK")
 		for _, col := range t.columns {
@@ -143,6 +147,15 @@ func (t *Table) init() {
 			}
 		}
 	}
+
+	for _, inl := range t.isInlinedIn {
+		inl.init()
+	}
+
+	if !t.index { // Skip checks & setup for ignored tables
+		return
+	}
+
 	if t.pkCol == nil {
 		t.logger.Fatal("Unknown PK")
 	}
@@ -193,6 +206,31 @@ func (t *Table) IndexColumns() (columns []*Column) {
 	}
 	// sort.Slice(columns, func(i, j int) bool { return columns[i].pos < columns[j].pos })
 	return
+}
+
+func (t *Table) CopyQuery() string {
+	var q strings.Builder
+	q.WriteString("COPY ")
+	q.WriteByte('"')
+	q.WriteString(strings.ReplaceAll(t.schema.name, `"`, `""`))
+	q.WriteString(`"."`)
+	q.WriteString(strings.ReplaceAll(t.name, `"`, `""`))
+	q.WriteString("\" (")
+
+	for i, col := range t.IndexColumns() {
+		if i != 0 {
+			q.WriteByte(',')
+		}
+		col.pos = i // Update positions, relative to SELECT result. Position will be overwriten after replication starts
+
+		q.WriteByte('"')
+		q.WriteString(col.name) // TODO: escape
+		q.WriteByte('"')
+	}
+	q.WriteByte(')')
+	q.WriteString(" TO STDOUT WITH BINARY;")
+
+	return q.String()
 }
 
 func (t *Table) SelectQuery() string {

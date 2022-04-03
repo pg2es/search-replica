@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgtype"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
@@ -20,26 +21,50 @@ type Column struct {
 	oldInWAL  bool   // old value is stored in WAL for delete/update operations. See: https://www.postgresql.org/docs/10/sql-altertable.html#SQL-CREATETABLE-REPLICA-IDENTITY
 
 	// Postgres
-	pos      int              // column position in LogicalReplication messages or `SELECT ... ` query result, during cold start
+	pos      int              // column position in LogicalReplication messages or `COPY TO ... ` query result, during cold start
 	connInfo *pgtype.ConnInfo // same pointer as in database.connInfo
-	decoder  DecoderValue
-	// decoderBinary bool
-	// decoderText   bool
+
+	value DecoderValue // TODO: decouple state from column
+
 	logger *zap.Logger
+}
+
+func (c *Column) Copy() *Column {
+	newCol := *c
+	newCol.value = pgtype.NewValue(c.value).(DecoderValue)
+	return &newCol
+}
+
+func (col *Column) decode(data []byte, dataType uint8) (err error) {
+	switch dataType {
+	case pglogrepl.TupleDataTypeBinary:
+		err = col.value.DecodeBinary(col.connInfo, data)
+	case pglogrepl.TupleDataTypeText:
+		err = col.value.DecodeText(col.connInfo, data)
+	default:
+		col.logger.Error("Unknown column dataType", zap.Uint8("type", dataType))
+	}
+	if err != nil {
+		col.logger.Warn("failed to decode column value", zap.Error(err))
+		return errors.Wrapf(err, "decode column (%s) value", col.name)
+	}
+
+	return nil
+}
+
+func (col *Column) MarshalJSON() ([]byte, error) {
+	// reuse predefined MarshalJSON methods on postgress types, to preserve null values, skip zeroing, and possible speedup
+	if marshaller, ok := col.value.(json.Marshaler); ok {
+		val, err := marshaller.MarshalJSON()
+		return val, errors.Wrapf(err, "Marshal column (%s) value via MarshalJSON", col.name)
+	}
+
+	val, err := json.Marshal(col.value.Get())
+	return val, errors.Wrapf(err, "Marshal column (%s) value via json.Marshal", col.name)
 }
 
 func (c *Column) jsonKey() string {
 	return c.fieldName
-}
-
-func (old *Column) Copy() *Column {
-	newCol := *old
-	return &newCol
-}
-
-// Table returns column's owner table
-func (cc *Column) Table() *Table {
-	return cc.table
 }
 
 // setTyp sets column type, as decoder. In future will check if decoder is capable of binary decoding and json marshaling
@@ -48,64 +73,23 @@ func (c *Column) setTyp(typ *pgtype.DataType) {
 		c.logger.Error("undefined (nil) column type") // Consider Fatal.
 		return
 	}
+
 	ok := false
-	// XXX: split here for binary and text decoding
-	// if c.binaryDecoder, ok = typ.Value.(BinaryDecoderValue); !ok {
-	if c.decoder, ok = typ.Value.(DecoderValue); !ok {
-		c.logger.Error("can not set column type: DecoderValue is not implemented", zap.String("type", typ.Name)) // Consider Fatal.
+	if c.value, ok = pgtype.NewValue(typ.Value).(DecoderValue); !ok { // own copy of type for column state
+		c.logger.Error("can not set column type: DecodeValue is not implemented", zap.String("type", typ.Name)) // Consider Fatal.
 	}
 }
 
 // DecoderValue can decode value and return pgtype object which implies Value interface.
-// see: https://github.com/kyleconroy/pgoutput/blob/6f49f4f3563fd90d1b96449f40540da7a0768f58/parse.go#L176-L179
 type DecoderValue interface {
 	pgtype.TextDecoder
-	// pgtype.BinaryDecoder // Not all types support BinaryDecoder.
-	Get() interface{} // From pgtype.Value
+	pgtype.BinaryDecoder // Not all types support BinaryDecoder.
+	pgtype.Value
 }
 
-func (col *Column) checkRowBoundaries(row [][]byte) {
-	if col.pos >= len(row) {
-		col.logger.Fatal("column position is out of row range", zap.Int("position", col.pos), zap.Int("row_size", len(row)))
-	}
-}
-
-func (col *Column) string(src []byte) string {
-	if err := col.decoder.DecodeText(col.connInfo, src); err != nil {
-		col.logger.Warn("failed to decode column value", zap.Error(err))
+func (col *Column) string() string {
+	if col.value.Get() == nil {
 		return ""
 	}
-	if col.decoder.Get() == nil {
-		return ""
-	}
-	return fmt.Sprint(col.decoder.Get())
-}
-
-// stringFromRow is used for _id, routing, join parent fields, where string value is required.
-func (col *Column) stringFromRow(row [][]byte) string {
-	col.checkRowBoundaries(row)
-	return col.string(row[col.pos])
-}
-
-func (col *Column) jsonFromRow(row [][]byte) ([]byte, error) {
-	col.checkRowBoundaries(row)
-	return col.json(row[col.pos])
-}
-
-// json returns json encoded value of column in src
-func (col *Column) json(src []byte) ([]byte, error) {
-	if err := col.decoder.DecodeText(col.connInfo, src); err != nil {
-		col.logger.Warn("failed to decode column value", zap.Error(err))
-		return nil, errors.Wrapf(err, "decode column (%s) value", col.name)
-	}
-
-	// reuse predefined MarshalJSON methods on postgress types, to preserve null values, skip zeroing, and possible speedup
-	if marshaller, ok := col.decoder.(json.Marshaler); ok {
-		val, err := marshaller.MarshalJSON()
-		return val, errors.Wrapf(err, "Marshal column (%s) value via MarshalJSON", col.name)
-	}
-
-	val, err := json.Marshal(col.decoder.Get())
-	return val, errors.Wrapf(err, "Marshal column (%s) value via json.Marshal", col.name)
-
+	return fmt.Sprint(col.value.Get())
 }

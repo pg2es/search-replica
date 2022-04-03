@@ -74,22 +74,6 @@ func (db *Database) NextMessage(ctx context.Context) (Document, error) {
 	}
 }
 
-// Select everything and push (streaming) it into elasticsearch.
-func (db *Database) Reindex(ctx context.Context) error {
-	conn, err := db.newConn(ctx)
-	if err != nil {
-		return errors.Wrap(err, "reindex all")
-	}
-	defer conn.Close(ctx)
-
-	for _, table := range db.IndexableTables() {
-		if err := table.SelectAll(ctx, conn); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // IndexableTables returns filtered list of tables, that's are subject to be indexed
 // helper function
 func (db *Database) IndexableTables() (tables []*Table) {
