@@ -150,17 +150,14 @@ func main() {
 		db.CreateReplicationSlot(ctx)
 	}
 
-	startAt := pglogrepl.LSN(0) //Zero value means: Get last commited position for this slot from master
 	if reindex {
-		logger.Info("REINDEX")
-		err := db.Reindex(ctx) // blocking; should be called in same transaction as slot creation
-		if err != nil {
-			log.Fatal(err)
+		logger.Info("REINDEXING DATA")
+		if err := db.Reindex(ctx); err != nil { // blocking; should be called in same transaction as slot creation
+			logger.Fatal("reindexing failed", zap.Error(err))
 		}
 	}
 
-	// Since we do not need snapshot anymore, we can commit the transaction.
-	// And we need to do so, because streaming replication is not possible within a transaction.
+	// After copying snapshot, which represents slot state, we should finish transaction before streaming replication
 	if err := db.Commit(ctx); err != nil {
 		logger.Fatal("commit transaction", zap.Error(err))
 	}
@@ -177,6 +174,7 @@ func main() {
 		}
 	}()
 
+	startAt := pglogrepl.LSN(0)             //Zero value means: Get last commited position for this slot from master
 	err = db.StartReplication(ctx, startAt) // blocking
 	if err != nil {
 		logger.Fatal("replication error", zap.Error(err))

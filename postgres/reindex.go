@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgconn"
@@ -22,6 +23,9 @@ func (t *Table) CopyAll(ctx context.Context, conn *pgconn.PgConn) error {
 
 	// buf := &bytes.Buffer{}
 	pipeReader, pipeWriter := io.Pipe()
+	wg := &sync.WaitGroup{}
+	wg.Add(2)
+	defer wg.Wait()
 
 	parser := pgcopy.NewParser()
 	go func() {
@@ -29,6 +33,7 @@ func (t *Table) CopyAll(ctx context.Context, conn *pgconn.PgConn) error {
 		if err != nil {
 			t.logger.Error("parser error", zap.Error(err))
 		}
+		wg.Done()
 	}()
 
 	go func() {
@@ -37,7 +42,8 @@ func (t *Table) CopyAll(ctx context.Context, conn *pgconn.PgConn) error {
 		if err != nil {
 			t.logger.Error("copy to", zap.Error(err))
 		}
-		t.logger.Error("copy to CMD handler", zap.Int64("rows", cmd.RowsAffected()))
+		t.logger.Info("copy to CMD handler", zap.Int64("rows", cmd.RowsAffected()))
+		wg.Done()
 	}()
 
 	// TODO: configurable

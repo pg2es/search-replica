@@ -1,0 +1,82 @@
+name: Integration
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+permissions:
+  contents: read
+  pull-requests: read
+jobs:
+  consistency-test:
+    runs-on: ubuntu-latest
+    services:
+      search:
+        image: docker.elastic.co/elasticsearch/elasticsearch:7.10.2-amd64
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: false
+        options: >-
+          --health-cmd "curl -XGET http://127.0.0.1:9200 -u admin:admin --insecure"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 9200:9200
+      postgres:
+        image: postgres:13-alpine
+        env:
+          # allows anyone to connect without a password, even if one is set 
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        options: >-
+          --name postgres
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: postgres
+      SEARCH_HOST: http://127.0.0.1:9200
+      LOG_LEVEL: info
+      LOG_FORMAT: cli
+      CGO_ENABLED: 0
+    steps:
+    - uses: actions/checkout@v2
+    - uses: actions/setup-go@v1
+      with:
+        go-version: '1.17.x'
+
+    - name: Set up PostgreSQL
+      run: |
+        #setup proper WAL level
+        echo 'ALTER SYSTEM SET wal_level = logical;' | docker exec -e PGUSER=$PGUSER -i postgres psql -f -
+        docker restart postgres # restart is required
+
+        # setup schema
+        cat ./demo/schema.sql | docker exec -e PGUSER=$PGUSER -i postgres psql -f -
+
+        # import data
+        (
+          echo 'COPY "main_doc" FROM STDIN WITH CSV;'
+          cat ./demo/data/main_doc.csv
+          echo '\.'
+          echo 'COPY "child_doc" FROM STDIN WITH CSV;'
+          cat ./demo/data/child_doc.csv
+          echo '\.'
+          echo 'COPY "inline_doc" FROM STDIN WITH CSV;'
+          cat ./demo/data/inline_doc.csv
+          echo '\.'
+        ) | docker exec -e PGUSER=$PGUSER -i postgres psql -f -
+
+    - name: Build and Install SearchReplica
+      run: go build -o ./search-replica -a -ldflags "-w -X main.Version=PR" ./ && chmod +x ./search-replica
+
+    - name: Run search-replica, wait and check consistency
+      run: ./search-replica -create -reindex & sleep 60 && go test -v -count 1 -tags=integration ./demo/...
