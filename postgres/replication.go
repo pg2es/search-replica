@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgconn"
@@ -51,7 +53,16 @@ func (db *Database) Connect(ctx context.Context) error {
 		return errors.Wrap(err, "can not connect")
 	}
 
-	db.logger.Info("Connected to DB")
+	db.version = db.queryConn.ParameterStatus("server_version")
+
+	// check if Binary decoding is possible (PG14+)
+	major, err := strconv.Atoi(strings.Split(db.version, ".")[0])
+	if err != nil {
+		db.logger.Warn("can not parse Postgres major version", zap.String("postgres_version", db.version))
+	}
+	db.useBinary = major >= 14
+
+	db.logger.Info("Connected to Database", zap.String("postgres_version", db.version), zap.Bool("binary_streaming", db.useBinary))
 	return nil
 }
 
@@ -122,9 +133,11 @@ func (db *Database) GetCurrentLSN(ctx context.Context) pglogrepl.LSN {
 
 func (db *Database) StartReplication(ctx context.Context, at pglogrepl.LSN) error {
 	pluginArguments := []string{
-		"binary 'true'", // TODO: Add binary for PG14+
-		"proto_version '1'",
-		"publication_names '" + db.Publication + "'", // TODO: escape pgPublication
+		"proto_version '1'",                          // next protocol versions are not required for our use case.
+		"publication_names '" + db.Publication + "'", // TODO: escape pgPublication; support multiple publications
+	}
+	if db.useBinary { // Binary streaming for PG14+
+		pluginArguments = append(pluginArguments, "binary 'true'")
 	}
 
 	opts := pglogrepl.StartReplicationOptions{PluginArgs: pluginArguments}
@@ -133,7 +146,7 @@ func (db *Database) StartReplication(ctx context.Context, at pglogrepl.LSN) erro
 	}
 
 	standbyDeadline := time.Now().Add(db.StandbyTimeout)
-	db.logger.Info("started streaming replication")
+	db.logger.Info("Started streaming replication")
 
 	prevCommit := db.LSN()
 	for {
