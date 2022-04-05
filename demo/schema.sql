@@ -1,6 +1,4 @@
 -- in case you forgot to enable it in postgres config
-ALTER SYSTEM SET wal_level = logical;
-
 DROP PUBLICATION IF EXISTS "search";
 DROP TABLE IF EXISTS "main_doc";
 DROP TABLE IF EXISTS "inline_doc";
