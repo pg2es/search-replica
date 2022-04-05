@@ -76,8 +76,6 @@ Special `docType` _(in future configurable)_ field is attached to each document.
  - [ ] Improve auto discovery, for inlines/join relations
 
 
-
-
 #### How it works
 
 ##### 1. Descovery & initial config
@@ -162,6 +160,26 @@ and this would produce documents like
 }
 
 ```
+
+#### Env Config
+
+| Variable             | Default   | Description |
+-----------------------|-----------|-------------|
+| PG_SLOT              | pg2es     | replication slot name |
+| PG_PUBLICATION       | search    | publication name |
+| PGHOST               | localhost | 
+| PGPORT               | 5432      | 
+| PGDATABASE           | -         |
+| PGUSER               | -         |
+| PGPASSWORD           | -         |
+| SEARCH_HOST          | -         | URL or host of ElasticSearch/OpenSearch
+| SEARCH_USERNAME      | -         | optional
+| SEARCH_PASSWORD      | -         | optional
+| SEARCH_BULK_SIZE     | 4         | (MB) Bulk request size limit.
+| SEARCH_PUSH_INTERVAL | 30s       | idle push interval, when there is no enough rows for full bulk request.
+| LOG_FORMAT           | json      | json or cli
+| LOG_LEVEL            | warn      | from debug to fatal
+
 
 #### Possible configuration tags:
 
