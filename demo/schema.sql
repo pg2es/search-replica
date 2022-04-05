@@ -1,3 +1,6 @@
+-- in case you forgot to enable it in postgres config
+ALTER SYSTEM SET wal_level = logical;
+
 DROP PUBLICATION IF EXISTS "search";
 DROP TABLE IF EXISTS "main_doc";
 DROP TABLE IF EXISTS "inline_doc";
@@ -74,6 +77,7 @@ COMMENT ON COLUMN "inline_doc".value  IS 'inline:"inline_name"';
 COMMENT ON TABLE "child_doc" IS 'index:"child,all" join:"join,immachild"';
 COMMENT ON COLUMN "child_doc".id IS 'index:",id"';
 COMMENT ON COLUMN "child_doc".parent_id IS 'index:",routing" join:"parent"';
+COMMENT ON COLUMN "child_doc".ignore_me IS 'index:"-"';
 
 
 
