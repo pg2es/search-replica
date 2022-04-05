@@ -36,13 +36,14 @@ type Database struct {
 	queryConnMu sync.Mutex     // pgconn.PgConn is not thread safe.
 
 	connInfo       *pgtype.ConnInfo
+	version        string
 	SlotName       string
+	useBinary      bool
 	Publication    string
 	StandbyTimeout time.Duration
 	committedLSN   pglogrepl.LSN
 
-	logger *zap.Logger
-
+	logger  *zap.Logger
 	results chan Document
 }
 
