@@ -90,15 +90,17 @@ func (t *Table) decodeTuple(tuple *pglogrepl.TupleData) error {
 }
 
 func (t *Table) elasticBulkHeader(action ESAction) ([]byte, error) {
-	header, payload := newHeader(action)
+	header := bulkHeader{
+		Action: action,
+		Index:  t.indexName,
+		ID:     t.pkCol.string(),
+	}
 
-	payload.Index = t.indexName
-	payload.ID = t.pkCol.string()
 	if !t.pkNoPrefix { // add document type prefix to ID, to avoid collisions
-		payload.ID = t.name + "_" + payload.ID
+		header.ID = t.name + "_" + header.ID
 	}
 	if t.routingCol != nil {
-		payload.Routing = t.routingCol.string()
+		header.Routing = t.routingCol.string()
 	}
 
 	return json.Marshal(header)

@@ -72,15 +72,17 @@ func (i *Inline) keysChanged(oldRow, newRow [][]byte) bool {
 }
 
 func (i *Inline) elasticBulkHeader(action ESAction) ([]byte, error) {
-	header, payload := newHeader(ESUpdate) // Always Update
+	header := bulkHeader{
+		Action: ESUpdate,
+		Index:  i.parent.indexName,
+		ID:     i.parentCol.string(),
+	}
 
-	payload.Index = i.parent.indexName
-	payload.ID = i.parentCol.string()
 	if !i.parent.pkNoPrefix {
-		payload.ID = i.parent.name + "_" + payload.ID
+		header.ID = i.parent.name + "_" + header.ID
 	}
 	if i.routingCol != nil {
-		payload.Routing = i.routingCol.string()
+		header.Routing = i.routingCol.string()
 	}
 
 	return json.Marshal(header)
