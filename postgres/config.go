@@ -73,10 +73,12 @@ func (db *Database) NextMessage(ctx context.Context) (Document, error) {
 		if !ok {
 			return Document{}, ErrChClosed
 		}
-		db.logger.Debug("doc", zap.Stringer("position", doc.LSN),
-			zap.Any("body", json.RawMessage(doc.Data)),
-			zap.Any("head", json.RawMessage(doc.Meta)),
-		)
+		if len(doc.Meta)+len(doc.Data) > 0 {
+			db.logger.Debug("doc", zap.Stringer("position", doc.LSN),
+				zap.Any("body", json.RawMessage(doc.Data)),
+				zap.Any("head", json.RawMessage(doc.Meta)),
+			)
+		}
 		return doc, nil
 	case <-ctx.Done():
 		return Document{}, ErrTimeout
