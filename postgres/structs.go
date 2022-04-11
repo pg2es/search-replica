@@ -9,39 +9,42 @@ import (
 	jwriter "github.com/mailru/easyjson/jwriter"
 )
 
-//easyjson:json
-type bulkHeaderPayload struct {
+// bulkHeader is a header for a bulk request (meta)
+// {"action": {"_index": "foo", ... }}
+type bulkHeader struct {
+	Action  ESAction
 	Index   string `json:"_index"`
 	ID      string `json:"_id,omitempty"`
 	Routing string `json:"routing,omitempty"`
 }
 
-//easyjson:json
-type bulkHeader struct {
-	// maybe it's even possible to make those fields private
-	Insert *bulkHeaderPayload `json:"insert,omitempty"`
-	Update *bulkHeaderPayload `json:"update,omitempty"`
-	Delete *bulkHeaderPayload `json:"delete,omitempty"`
-	Index  *bulkHeaderPayload `json:"index,omitempty"`
+// MarshalJSON supports json.Marshaler interface
+func (v bulkHeader) MarshalJSON() ([]byte, error) {
+	w := jwriter.Writer{}
+	v.MarshalEasyJSON(&w)
+	return w.Buffer.BuildBytes(), w.Error
 }
 
-// newHeader returns pointers for header and subfield payload inside a header
-func newHeader(action ESAction) (h *bulkHeader, p *bulkHeaderPayload) {
-	h = &bulkHeader{}
-	p = &bulkHeaderPayload{}
+// MarshalEasyJSON supports easyjson.Marshaler interface
+func (v bulkHeader) MarshalEasyJSON(w *jwriter.Writer) {
+	// `{"action":{` prefix
+	w.RawByte('{')
+	w.String(string(v.Action))
+	w.RawString(`:{`)
 
-	switch action {
-	case ESInsert:
-		h.Insert = p
-	case ESUpdate:
-		h.Update = p
-	case ESDelete:
-		h.Delete = p
-	case ESIndex:
-		h.Index = p
+	// required _index and _id fields
+	w.RawString(`"_index":`)
+	w.String(v.Index)
+	w.RawString(`,"_id":`)
+	w.String(v.ID)
+
+	// omitempty optional field
+	if v.Routing != "" {
+		w.RawString(`,"routing":`)
+		w.String(v.Routing)
 	}
 
-	return h, p
+	w.RawString(`}}`)
 }
 
 type stringKV struct {
