@@ -46,7 +46,7 @@ func (t *Table) parseJoinTag(tags conftags.Tags) error {
 
 func (t *Table) parseInlineTags(tags conftags.Tags) error {
 	for _, tag := range tags.Filter("inline") {
-		inline := t.schema.Inline(tag.Values[0])
+		inline := t.schema.inline(tag.Values[0])
 
 		// cross links
 		inline.parent = t
@@ -107,7 +107,7 @@ func (c *Column) parseStructTag(tag string) error {
 
 func (col *Column) parseInlineTags(tags conftags.Tags) error {
 	for _, tag := range tags.Filter("inline") {
-		inline := col.table.schema.Inline(tag.Values[0])
+		inline := col.table.schema.inline(tag.Values[0])
 
 		// cross links
 		if inline.source == nil {

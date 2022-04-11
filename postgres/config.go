@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -61,23 +62,32 @@ type Document struct {
 	Data []byte // document content or script
 }
 
-var errTimeout = errors.New("timeout")
+var (
+	ErrTimeout  = errors.New("timeout")
+	ErrChClosed = errors.New("document channel is closed")
+)
 
 func (db *Database) NextMessage(ctx context.Context) (Document, error) {
 	select {
 	case doc, ok := <-db.results:
 		if !ok {
-			return Document{}, errors.New("document chanel is closed")
+			return Document{}, ErrChClosed
+		}
+		if len(doc.Meta)+len(doc.Data) > 0 {
+			db.logger.Debug("doc", zap.Stringer("position", doc.LSN),
+				zap.Any("body", json.RawMessage(doc.Data)),
+				zap.Any("head", json.RawMessage(doc.Meta)),
+			)
 		}
 		return doc, nil
 	case <-ctx.Done():
-		return Document{}, errTimeout
+		return Document{}, ErrTimeout
 	}
 }
 
-// IndexableTables returns filtered list of tables, that's are subject to be indexed
+// indexableTables returns filtered list of tables, that's are subject to be indexed
 // helper function
-func (db *Database) IndexableTables() (tables []*Table) {
+func (db *Database) indexableTables() (tables []*Table) {
 	for _, sc := range db.schemas {
 		for _, tc := range sc.tables {
 			if tc.index || len(tc.isInlinedIn) > 0 {
@@ -110,7 +120,11 @@ func (db *Database) IndexableTables() (tables []*Table) {
 	return tables
 }
 
-func (db *Database) DataType(oid uint32) (*pgtype.DataType, error) {
+// dataTypDecoder returns DecoderValue for specific type by OID.
+// for user defined types it tries to resolve basic type and returns DecoderValue for it.
+// Does not support arrays of composite types, however arrays and composite types are supported.
+// For changes in decoding or json marhasling, check pgtype package itself.
+func (db *Database) dataTypeDecoder(oid uint32) (*pgtype.DataType, error) {
 	if oid == 0 {
 		return nil, errors.New("Invalid ZERO type")
 	}
@@ -127,24 +141,25 @@ func (db *Database) DataType(oid uint32) (*pgtype.DataType, error) {
 
 }
 
-func (db *Database) Relation(id uint32) (tc *Table) {
-	if r, ok := db.relationSet[id]; ok {
+// returns table (relation) by OID or nil if not found
+func (db *Database) relation(oid uint32) (tc *Table) {
+	if r, ok := db.relationSet[oid]; ok {
 		return r
 	}
+	// TODO: remove fallback search
 	for _, schema := range db.schemas {
 		for _, table := range schema.tables {
-			if table.relID == id {
-				db.relationSet[id] = table
+			if table.relID == oid {
+				db.relationSet[oid] = table
 				return table
 			}
 		}
 	}
 	return nil
-
 }
 
-// Schema returns (and creates if required) initialized schema config
-func (db *Database) Schema(name string) (sc *Schema) {
+// schema returns (and creates if required) initialized schema config
+func (db *Database) schema(name string) (sc *Schema) {
 	if _, exists := db.schemas[name]; !exists {
 		db.schemas[name] = &Schema{
 			name:      name,
@@ -172,7 +187,7 @@ type Schema struct {
 	enumTypes map[string]*pgtype.EnumType
 }
 
-func (sc *Schema) Table(name string) (tc *Table) {
+func (sc *Schema) table(name string) (tc *Table) {
 	if _, exists := sc.tables[name]; !exists {
 		sc.tables[name] = &Table{
 			schema:  sc,
@@ -187,8 +202,8 @@ func (sc *Schema) Table(name string) (tc *Table) {
 	return sc.tables[name]
 }
 
-// Inline returns new, or existing inline by name with reasonable defaults
-func (sc *Schema) Inline(name string) (inl *Inline) {
+// inline returns new, or existing inline by name with reasonable defaults
+func (sc *Schema) inline(name string) (inl *Inline) {
 	if _, exists := sc.inlines[name]; !exists {
 		sc.inlines[name] = &Inline{
 			name:        name,

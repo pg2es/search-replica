@@ -69,7 +69,7 @@ func (t *Table) keysChanged(oldRow, newRow [][]byte) bool {
 }
 
 func (t *Table) decodeRow(row [][]byte, dataType uint8) error {
-	for _, col := range t.IndexColumns() {
+	for _, col := range t.indexColumns() {
 		if err := col.decode(row[col.pos], dataType); err != nil {
 			return err
 		}
@@ -78,7 +78,7 @@ func (t *Table) decodeRow(row [][]byte, dataType uint8) error {
 }
 
 func (t *Table) decodeTuple(tuple *pglogrepl.TupleData) error {
-	for _, col := range t.IndexColumns() {
+	for _, col := range t.indexColumns() {
 		if col.pos >= len(tuple.Columns) {
 			return errors.New("column out of range")
 		}
@@ -110,8 +110,7 @@ func (t *Table) MarshalJSON() ([]byte, error) {
 	return out.Buffer.BuildBytes(), out.Error
 }
 
-// EncodeUpdateRowJSON generates json.
-// during updates, new document should be wrapper into a {"doc": ... } object
+// EncodeUpdateRowJSON wraps row into `{"doc": ... }` object, required by ElasticSearch bulk request syntax for update queries
 func (t *Table) EncodeUpdateRowJSON() ([]byte, error) {
 	out := jwriter.Writer{}
 	out.RawString(`{"doc":`)
@@ -189,8 +188,8 @@ func (t *Table) Column(name string) (col *Column) {
 	return col
 }
 
-// IndexColumns lists columns that are used for indexing, including inlines and id/routing fields
-func (t *Table) IndexColumns() (columns []*Column) {
+// indexColumns lists columns that are used for indexing, including inlines and id/routing fields
+func (t *Table) indexColumns() (columns []*Column) {
 	for _, col := range t.columns {
 		if col.index {
 			columns = append(columns, col)
@@ -208,51 +207,29 @@ func (t *Table) IndexColumns() (columns []*Column) {
 	return
 }
 
-func (t *Table) CopyQuery() string {
+// copyQuery returns copy query suitable for initial data load.
+// E.G: COPY "foo" ("baz","baz") TO STDOUT WITH BINARY;
+func (t *Table) copyQuery() string {
 	var q strings.Builder
-	q.WriteString("COPY ")
+	q.WriteString(`COPY `)
 	q.WriteByte('"')
 	q.WriteString(strings.ReplaceAll(t.schema.name, `"`, `""`))
 	q.WriteString(`"."`)
 	q.WriteString(strings.ReplaceAll(t.name, `"`, `""`))
-	q.WriteString("\" (")
+	q.WriteString(`" (`)
 
-	for i, col := range t.IndexColumns() {
+	for i, col := range t.indexColumns() {
 		if i != 0 {
 			q.WriteByte(',')
 		}
 		col.pos = i // Update positions, relative to SELECT result. Position will be overwriten after replication starts
 
 		q.WriteByte('"')
-		q.WriteString(col.name) // TODO: escape
+		q.WriteString(strings.ReplaceAll(col.name, `"`, `""`))
 		q.WriteByte('"')
 	}
 	q.WriteByte(')')
-	q.WriteString(" TO STDOUT WITH BINARY;")
-
-	return q.String()
-}
-
-func (t *Table) SelectQuery() string {
-	var q strings.Builder
-	q.WriteString(" SELECT ")
-
-	for i, col := range t.IndexColumns() {
-		if i != 0 {
-			q.WriteByte(',')
-		}
-		col.pos = i // Update positions, relative to SELECT result. Position will be overwriten after replication starts
-
-		q.WriteByte('"')
-		q.WriteString(col.name) // TODO: escape
-		q.WriteByte('"')
-	}
-
-	q.WriteString(" FROM ")
-	q.WriteString(t.schema.name)
-	q.WriteByte('.')
-	q.WriteString(t.name)
-	q.WriteByte(';')
+	q.WriteString(` TO STDOUT WITH BINARY;`)
 
 	return q.String()
 }

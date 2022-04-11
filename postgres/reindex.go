@@ -18,7 +18,7 @@ import (
 func (t *Table) CopyAll(ctx context.Context, conn *pgconn.PgConn) error {
 	t.init()
 
-	q := t.CopyQuery() // COPY foo (baz, baz) TO STDOUT WITH BINARY;
+	q := t.copyQuery()
 	t.logger.Info("COPYing snapshot", zap.String("sql", q))
 
 	// buf := &bytes.Buffer{}
@@ -68,20 +68,18 @@ func (t *Table) CopyAll(ctx context.Context, conn *pgconn.PgConn) error {
 			meta, _ := t.elasticBulkHeader(ESIndex)
 			data, _ := t.MarshalJSON()
 			t.schema.database.results <- Document{LSN: 0, Meta: meta, Data: data}
-			t.logger.Debug("row", zap.ByteString("body", meta), zap.ByteString("head", data))
 		}
 		for _, inl := range t.isInlinedIn {
 			meta, _ := inl.elasticBulkHeader(ESUpdate)
 			data, _ := inl.jsonAddScript()
 			t.schema.database.results <- Document{LSN: 0, Meta: meta, Data: data}
-			t.logger.Debug("inline", zap.ByteString("body", meta), zap.ByteString("head", data))
 		}
 	}
 }
 
 // Select everything and push (streaming) it into elasticsearch.
 func (db *Database) Reindex(ctx context.Context) error {
-	for _, table := range db.IndexableTables() {
+	for _, table := range db.indexableTables() {
 		if err := table.CopyAll(ctx, db.replConn); err != nil {
 			return err
 		}

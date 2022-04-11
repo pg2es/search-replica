@@ -29,7 +29,7 @@ type Column struct {
 	logger *zap.Logger
 }
 
-func (c *Column) Copy() *Column {
+func (c *Column) copy() *Column {
 	newCol := *c
 	newCol.value = pgtype.NewValue(c.value).(DecoderValue)
 	return &newCol
