@@ -1,4 +1,5 @@
 // package pgcopy - parser for PostgreSQL `COPY TO ... WITH BINARY` command result
+// FileFormat: https://www.postgresql.org/docs/current/sql-copy.html#id-1.9.3.55.9.4.5
 package pgcopy
 
 import (

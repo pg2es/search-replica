@@ -61,14 +61,14 @@ func (db *Database) Discover(ctx context.Context) error {
 		cd.Typ.DecodeBinary(nil, row[6])
 		cd.OldInWAL.DecodeBinary(nil, row[7])
 
-		t := db.Schema(cd.Schema.String).Table(cd.Table.String)
+		t := db.schema(cd.Schema.String).table(cd.Table.String)
 		t.parseStructTag(cd.TableComment.String) // table config needs to be parsed before column config, since some values are inherited from it
 		col := t.Column(cd.Column.String)
 		col.parseStructTag(cd.ColumnComment.String)
 		col.sqlPK = cd.PK.Bool
 		col.oldInWAL = cd.OldInWAL.Bool
 
-		dataType, err := db.DataType(uint32(cd.Typ))
+		dataType, err := db.dataTypeDecoder(uint32(cd.Typ))
 		if err != nil {
 			t.logger.Warn("can not find data type for column", zap.String("column", cd.Column.String))
 		}

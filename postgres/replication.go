@@ -16,7 +16,7 @@ import (
 	"go.uber.org/zap"
 )
 
-const OutputPlugin = "pgoutput" // important
+const outputPlugin = "pgoutput" // important
 
 func pgconnConfig() (*pgconn.Config, error) {
 	config, err := pgconn.ParseConfig("") // falback to parsing env variables
@@ -39,8 +39,8 @@ func (db *Database) Connect(ctx context.Context) error {
 	db.name = config.Database // By default database name == index name
 
 	// "replication" key should not be defined for regular (query) connection.
-	// this connection is required for discovery and initial feetching data
-	// Since in physical or logical replication mode, only the simple query protocol can be used, which is not sufficient in this case.
+	// this connection is required for config and type discovery.
+	// In replication mode, only the simple query protocol can be used, which is not sufficient in this case.
 	delete(config.RuntimeParams, "replication")
 	if db.queryConn, err = pgconn.ConnectConfig(ctx, config); err != nil {
 		return errors.Wrap(err, "can not connect")
@@ -53,7 +53,7 @@ func (db *Database) Connect(ctx context.Context) error {
 		return errors.Wrap(err, "can not connect")
 	}
 
-	db.version = db.queryConn.ParameterStatus("server_version")
+	db.version = db.replConn.ParameterStatus("server_version")
 
 	// check if Binary decoding is possible (PG14+)
 	major, err := strconv.Atoi(strings.Split(db.version, ".")[0])
@@ -76,8 +76,6 @@ func (db *Database) newConn(ctx context.Context) (conn *pgconn.PgConn, err error
 }
 
 func (db *Database) Close(ctx context.Context) error {
-	// if d.queryConn != nil {
-
 	db.queryConnMu.Lock()
 	db.queryConn.Close(ctx)
 	db.queryConnMu.Unlock()
@@ -86,13 +84,19 @@ func (db *Database) Close(ctx context.Context) error {
 	return nil
 }
 
+// CreateReplicationSlot creates a replication slot at current position and uses newly created snapshot in current transaction.
+// For the sake of consistency it's important to use this method and initial data copying within transaction
+// db.Tx(ctx)
+// db.CreateReplicationSlot(ctx)
+// ... copy data
+// db.Commit(ctx)
 func (db *Database) CreateReplicationSlot(ctx context.Context) {
 	opts := pglogrepl.CreateReplicationSlotOptions{
 		Temporary:      false,
 		SnapshotAction: "USE_SNAPSHOT",
 		Mode:           pglogrepl.LogicalReplication,
 	}
-	_, err := pglogrepl.CreateReplicationSlot(ctx, db.replConn, db.SlotName, OutputPlugin, opts)
+	_, err := pglogrepl.CreateReplicationSlot(ctx, db.replConn, db.SlotName, outputPlugin, opts)
 	if err != nil {
 		db.logger.Error("failed to create replication slot", zap.String("slot", db.SlotName), zap.Error(err))
 		return
@@ -117,20 +121,12 @@ func (db *Database) DropReplicationSlot(ctx context.Context) {
 	db.logger.Info("dropped replication slot", zap.String("slot", db.SlotName))
 }
 
-func (db *Database) GetCurrentLSN(ctx context.Context) pglogrepl.LSN {
-	sysident, err := pglogrepl.IdentifySystem(ctx, db.replConn)
-	if err != nil {
-		db.logger.Fatal("failed to identify system", zap.Error(err))
-	}
-	db.logger.Info("system info",
-		zap.String("SystemID", sysident.SystemID),
-		zap.Int32("Timeline", sysident.Timeline),
-		zap.String("XLogPos", sysident.XLogPos.String()), // current WAL position
-		zap.String("DBName", sysident.DBName),
-	)
-	return sysident.XLogPos
-}
-
+// StartReplication switches replConn into `CopyBoth` mode and starts streaming.
+// decoded logical messages are passed for further processing, while status updates happens here.
+// during the streaming, replConn is locked and can not be used for anything else.
+//
+// XXX: PrimaryKeepaliveMessage.ServerWALEnd is actually the location up to which the WAL is sent
+// See: https://stackoverflow.com/questions/71016200/proper-standby-status-update-in-streaming-replication-protocol
 func (db *Database) StartReplication(ctx context.Context, at pglogrepl.LSN) error {
 	pluginArguments := []string{
 		"proto_version '1'",                          // next protocol versions are not required for our use case.
@@ -159,7 +155,7 @@ func (db *Database) StartReplication(ctx context.Context, at pglogrepl.LSN) erro
 			}
 			if commit > prevCommit {
 				prevCommit = commit
-				db.logger.Info("Commited LSN", zap.String("lsn", commit.String()))
+				db.logger.Info("Commited LSN", zap.Stringer("lsn", commit))
 			}
 			standbyDeadline = time.Now().Add(db.StandbyTimeout)
 		}
@@ -175,8 +171,6 @@ func (db *Database) StartReplication(ctx context.Context, at pglogrepl.LSN) erro
 			db.logger.Fatal("failed to receive message", zap.Error(err))
 		}
 
-		WALPos := pglogrepl.LSN(0)
-
 		switch msg := msg.(type) {
 		case *pgproto3.CopyData:
 			switch msg.Data[0] {
@@ -188,10 +182,7 @@ func (db *Database) StartReplication(ctx context.Context, at pglogrepl.LSN) erro
 				if pkm.ReplyRequested {
 					standbyDeadline = time.Time{}
 				}
-				if WALPos < pkm.ServerWALEnd {
-					WALPos = pkm.ServerWALEnd
-					db.results <- Document{LSN: pkm.ServerWALEnd}
-				}
+				db.results <- Document{LSN: pkm.ServerWALEnd}
 
 			case pglogrepl.XLogDataByteID:
 				xld, err := pglogrepl.ParseXLogData(msg.Data[1:])
@@ -202,25 +193,14 @@ func (db *Database) StartReplication(ctx context.Context, at pglogrepl.LSN) erro
 				if err != nil {
 					db.logger.Fatal("failed to parse replication message from XLogData", zap.Error(err))
 				}
-				// Not sure what exactly to commit. Docs are saying "The location of the last WAL byte + 1...",
-				// We have start, length of data and `+1`, and some combinations of those is correct.
-				// however pg_basebackup/pg_recvlogical.c just sets it to latest WALStart (see `output_written_lsn`)
-				// For now, let's stick with single WALStart
-				if xld.WALStart < WALPos { // TODO: Clarify in Postgres Slack and remove
-					db.logger.Fatal("KeepAlive and Data messages are not ordered by LSN")
-				}
+				// check xld.ServerWALEnd instead xld.WALStart
 				db.HandleLogical(ctx, xld.WALStart, logicalMsg) // TODO: make it non-blocking for standby
-				if WALPos < xld.WALStart {
-					WALPos = xld.WALStart
-				}
 			}
 		default:
 			db.logger.Fatal("received unexpected message", zap.String("type", fmt.Sprintf("%T", msg)))
 		}
 
 	}
-
-	return nil
 }
 
 // must is temporarily helper to fail in some places
@@ -241,14 +221,14 @@ func (db *Database) HandleLogical(ctx context.Context, lsn pglogrepl.LSN, msg pg
 	// This message is delivered at the bedinning, and after table schema canges.
 	// TODO: support droped columns
 	case *pglogrepl.RelationMessage:
-		table := db.Schema(v.Namespace).Table(v.RelationName)
+		table := db.schema(v.Namespace).table(v.RelationName)
 		table.SetRelationID(v.RelationID)
 		for pos, relcol := range v.Columns {
 			col := table.Column(relcol.Name)
 			// ... relcol.Flags&1 != 0  means PK
 			col.pos = pos
 
-			dataType, err := db.DataType(relcol.DataType)
+			dataType, err := db.dataTypeDecoder(relcol.DataType)
 			if err != nil {
 				return errors.Wrapf(err, "setup column type %s.%s", col.table.name, col.name)
 			}
@@ -257,7 +237,7 @@ func (db *Database) HandleLogical(ctx context.Context, lsn pglogrepl.LSN, msg pg
 		table.init() // field names
 
 	case *pglogrepl.InsertMessage:
-		table := db.Relation(v.RelationID)
+		table := db.relation(v.RelationID)
 
 		table.decodeTuple(v.Tuple)
 		if table.index {
@@ -273,7 +253,7 @@ func (db *Database) HandleLogical(ctx context.Context, lsn pglogrepl.LSN, msg pg
 		}
 
 	case *pglogrepl.UpdateMessage:
-		table := db.Relation(v.RelationID)
+		table := db.relation(v.RelationID)
 		// TODO: If PK or Routing field was changed, procceed with delete & insert pair. Also checking for table.insertOnly.
 		// if !table.insertOnly && () {
 		// oldRow := rowFromPGTuple(v.OldTuple)
@@ -296,7 +276,7 @@ func (db *Database) HandleLogical(ctx context.Context, lsn pglogrepl.LSN, msg pg
 		}
 
 	case *pglogrepl.DeleteMessage:
-		table := db.Relation(v.RelationID)
+		table := db.relation(v.RelationID)
 		table.decodeTuple(v.OldTuple)
 
 		if table.index && !table.upsertOnly {
