@@ -1,7 +1,13 @@
 name: Integration
 on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+    branches:
+      - master
 permissions:
   contents: read
   pull-requests: read
