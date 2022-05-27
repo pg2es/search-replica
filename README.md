@@ -1,5 +1,10 @@
-### Search Replica
+### Search Replica 
 Uses postgres [logical replication protocol](https://www.postgresql.org/docs/current/protocol-logical-replication.html) to subscribe and receive any updates almost in realtime. 
+
+| ver | status |
+------|--------|
+| master | [![Integration](https://github.com/pg2es/search-replica/actions/workflows/integration.yaml/badge.svg?branch=master)](https://github.com/pg2es/search-replica/actions/workflows/integration.yaml) [![build and push latest image](https://github.com/pg2es/search-replica/actions/workflows/push.yaml/badge.svg)](https://github.com/pg2es/search-replica/actions/workflows/push.yaml) |
+| v0.0.1 | tbd |
 
 Table rows, regardless of types, are encoded into JSON with additional ES metadata, which makes a Message (ES Document).
 Those messages are buffered and flushed into ES regularly, on a timeout or when buffer is already large enough.
