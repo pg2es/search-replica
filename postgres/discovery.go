@@ -73,6 +73,7 @@ func (db *Database) Discover(ctx context.Context) error {
 			t.logger.Warn("can not find data type for column", zap.String("column", cd.Column.String))
 		}
 		col.setTyp(dataType)
+		// col.logger.Debug("discovered column", zap.String("name", col.name), zap.String("field", col.fieldName))
 	}
 	return nil
 }

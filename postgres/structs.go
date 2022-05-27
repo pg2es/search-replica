@@ -74,6 +74,10 @@ type jsonKV interface {
 	jsonKey() string
 }
 
+type jsonOmitter interface {
+	Omit() bool
+}
+
 // document represents json document, that would be sent to search.
 // attempts to split table config from data.
 type document struct {
@@ -91,10 +95,18 @@ func (v document) MarshalJSON() ([]byte, error) {
 // Not generated; however easyjson genearated code was a reference
 func (v document) MarshalEasyJSON(out *jwriter.Writer) {
 	out.RawByte('{')
-	for i, col := range v.fields {
-		if i > 0 {
+	var comma bool
+	for _, col := range v.fields {
+		// skip empty columns (Non WAL or toasted values)
+		if m, ok := col.(jsonOmitter); ok && m.Omit() {
+			continue
+		}
+
+		if comma {
 			out.RawByte(',')
 		}
+		comma = true
+
 		out.String(col.jsonKey())
 		out.RawByte(':')
 

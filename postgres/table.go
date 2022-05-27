@@ -69,15 +69,21 @@ func (t *Table) keysChanged(oldRow, newRow [][]byte) bool {
 }
 
 func (t *Table) decodeRow(row [][]byte, dataType uint8) error {
+	var empty bool
 	for _, col := range t.indexColumns() {
 		if err := col.decode(row[col.pos], dataType); err != nil {
 			return err
 		}
+		empty = empty || col.valueOmit
+	}
+	if empty {
+		t.logger.Debug("Some columns are empty and may be omitted from resulting JSON")
 	}
 	return nil
 }
 
 func (t *Table) decodeTuple(tuple *pglogrepl.TupleData) error {
+	var empty bool
 	for _, col := range t.indexColumns() {
 		if col.pos >= len(tuple.Columns) {
 			return errors.New("column out of range")
@@ -85,6 +91,10 @@ func (t *Table) decodeTuple(tuple *pglogrepl.TupleData) error {
 		if err := col.decode(tuple.Columns[col.pos].Data, tuple.Columns[col.pos].DataType); err != nil {
 			return err
 		}
+		empty = empty || col.valueOmit
+	}
+	if empty {
+		t.logger.Debug("Some columns are empty and may be omitted from resulting JSON")
 	}
 	return nil
 }

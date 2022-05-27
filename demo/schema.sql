@@ -49,6 +49,9 @@ See: https://www.postgresql.org/docs/10/sql-altertable.html#SQL-CREATETABLE-REPL
 
 /* complex example with unique index which includes all required fields */
 CREATE UNIQUE INDEX "inline_uniq_index" ON "inline_doc" (id, parent_id);
+-- Unfortunately we can not use INCLUDE columns. They aren't stored in WAL. Following example would not work
+--  CREATE UNIQUE INDEX "inline_uniq_index" ON "inline_doc" (id) INCLUDE (parent_id);
+-- Dont forget to set newly created index as replica identity
 ALTER TABLE "inline_doc" REPLICA IDENTITY USING INDEX inline_uniq_index;
 /* or simpler index, less efficient, where all old fields  would be written to WAL */
 ALTER TABLE "child_doc" REPLICA IDENTITY FULL;

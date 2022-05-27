@@ -15,7 +15,6 @@ SELECT
 		WHEN t.relreplident = 'f' THEN true -- full: all columns
 	END saved_in_wal
 	--  a.attrelid as relation_oid -- table type (check if same as in streaming protocol)
-
 FROM pg_publication_tables AS pt
 	INNER JOIN pg_namespace s ON  pt.schemaname = s.nspname
 	INNER JOIN pg_class t ON  pt.tablename = t.relname AND t.relnamespace = s.oid
@@ -23,17 +22,23 @@ FROM pg_publication_tables AS pt
 	LEFT JOIN  (
 		SELECT -- group indice info by column before join
 			i.indrelid,
-			unnest(i.indkey) as attnum,
+			-- Only key columns are saved in WAL, so we filter out rest.
+			-- i.indkey is array of columns with size i.indatts
+			-- which starts with key-columns up to t.indkeyatts.
+			-- 'i.indnkeyatts-1' used because arrays start from zero.
+			unnest(i.indkey[:i.indnkeyatts-1]) AS attnum,
 			bool_or(i.indisprimary) as indisprimary,
 			bool_or(i.indisreplident) as indisreplident
 		FROM pg_index as i
-		WHERE i.indisprimary OR i.indisreplident -- We are interested in PK and WAL fields
+		WHERE i.indisprimary OR i.indisreplident -- We are interested in PK and WAL fields only
 		GROUP BY i.indrelid, attnum
 	) i ON a.attnum = i.attnum AND a.attrelid = i.indrelid
-
 WHERE pt.pubname=$1
-  AND a.attnum > 0 -- negative numbers are reserved for system columns.
+  -- negative numbers are reserved for system columns.
+  AND a.attnum > 0 
   AND NOT a.attisdropped 
-  AND t.relkind IN ('r', 'p') -- only [r]ealations and [p]artitions. [m]aterialized_views and other types are not supported by PG. 
-  AND s.nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast') -- skip system tables
-  ORDER BY s.nspname, t.relname, a.attnum;
+  -- only [r]ealations and [p]artitions. [m]aterialized_views and other types are not supported by PG.
+  AND t.relkind IN ('r', 'p')
+  -- skip system tables
+  AND s.nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast') 
+ORDER BY s.nspname, t.relname, a.attnum;
