@@ -61,20 +61,26 @@ func main() {
 	wg := &sync.WaitGroup{}
 	// TODO: waitgroups and gracefull shutdown
 
-	searchClient := &search.BulkElastic{
-		BufferSize: cfg.Search.BulkSizeLimit << 20, // Good one would be 4-8mb; limit ~100MB
-		PushPeriod: cfg.Search.PushInterval,
-	}
-	searchClient.Logger(logger)
-	if err := searchClient.Connect(ctx, cfg.Search.URL, cfg.Search.User, cfg.Search.Password); err != nil {
-		logger.Fatal(err.Error())
-	}
-	if err := searchClient.PrepareScripts(); err != nil {
+	stream := postgres.NewStreamPipe(ctx)
+
+	searchClient, err := search.NewElastic(search.BulkElasticOpts{
+		Host:         cfg.Search.URL,
+		Username:     cfg.Search.User,
+		Password:     cfg.Search.Password,
+		BulkSize:     cfg.Search.BulkSizeLimit,
+		IdleInterval: cfg.Search.PushInterval,
+		Logger:       logger,
+		Stream:       stream,
+		// Throttle:  TODO: expose config
+
+	})
+	if err != nil {
 		logger.Fatal(err.Error())
 	}
 
-	stream := postgres.NewStreamPipe(ctx)
-	searchClient.SetStream(stream)
+	if err := searchClient.PrepareScripts(); err != nil {
+		logger.Fatal(err.Error())
+	}
 	searchClient.Start(wg, ctx)
 
 	db := postgres.New(stream, logger)
