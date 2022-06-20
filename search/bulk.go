@@ -33,49 +33,93 @@ func init() {
 	prometheus.MustRegister(metricMessageSize)
 }
 
-// TODO: https://github.com/elastic/go-elasticsearch/blob/master/_examples/bulk/indexer.go
+type BulkElasticOpts struct {
+	Host     string
+	Username string
+	Password string
+
+	//
+	Logger *zap.Logger
+	// Maximum waiting time for data. Any partial bulk request will be pushed after idleInterval.
+	// Default: 5s
+	IdleInterval time.Duration
+	// Minimal time between requests.
+	// Default: 500ms
+	Throttle time.Duration
+	// Maximum bulk request
+	// Good one would be 4-8mb; limit ~100MBsize in megabytes
+	// Default: 4M
+	BulkSize int
+	// document stream
+	Stream *postgres.StreamPipe
+}
+
+func NewElastic(opts BulkElasticOpts) (es *BulkElastic, err error) {
+	if opts.IdleInterval < time.Second {
+		opts.IdleInterval = 5 * time.Second
+	}
+	if opts.Throttle == 0 {
+		opts.Throttle = 500 * time.Millisecond
+	}
+	if opts.BulkSize == 0 {
+		opts.BulkSize = 4
+	}
+	if opts.BulkSize > 100 {
+		opts.BulkSize = 100
+	}
+
+	if opts.Stream == nil {
+		return nil, errors.New("document stream can not be empty")
+	}
+
+	// allocate buffer of bulk size
+	buf := make([]byte, 0, opts.BulkSize<<20)
+
+	es = &BulkElastic{
+		logger:        opts.Logger,
+		stream:        opts.Stream,
+		buf:           bytes.NewBuffer(buf),
+		idle:          opts.IdleInterval,
+		idleTimer:     time.NewTimer(opts.IdleInterval),
+		throttle:      opts.Throttle,
+		throttleTimer: time.NewTimer(opts.Throttle),
+		// lastReqAt     :time.Now().
+		cond: sync.NewCond(&sync.Mutex{}),
+	}
+
+	if es.client, err = NewClient(opts.Host, opts.Username, opts.Password); err != nil {
+		return nil, err
+	}
+
+	return es, nil
+
+}
 
 type BulkElastic struct {
-	BufferSize int // in bytes
-	PushPeriod time.Duration
-
 	stream *postgres.StreamPipe
 	client *Client
-
 	wg     sync.WaitGroup
-	mu     sync.Mutex
-	buf    *bytes.Buffer
-	ticker *time.Ticker
-	// todo add throthling period (ticker)
 
-	// cond sync.Cond
+	// sync; state of buffer and timeouts
+	idle          time.Duration
+	idleTimer     *time.Timer
+	throttle      time.Duration
+	throttleTimer *time.Timer
+	lastReqAt     time.Time
+	cond          *sync.Cond
+	buf           *bytes.Buffer
+	full          bool
+	shutdown      bool
 
 	inqueue pglogrepl.LSN
 
 	logger *zap.Logger
 }
 
-func (e *BulkElastic) Logger(logger *zap.Logger) {
-	e.logger = logger
-}
-
-func (e *BulkElastic) Connect(ctx context.Context, host, username, password string) (err error) {
-	// TODO: use ctx for a timeout, for initial PING, etc
-	e.client, err = NewClient(host, username, password)
-	return errors.Wrap(err, "connecting to Search")
-}
-
 func (e *BulkElastic) Start(wg *sync.WaitGroup, ctx context.Context) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	buf := make([]byte, 0, e.BufferSize)
-	e.buf = bytes.NewBuffer(buf)
-	e.ticker = time.NewTicker(e.PushPeriod)
-	// testing cond
-	// e.cond = *sync.NewCond(&sync.Mutex{})
 
 	wg.Add(1)
-	go func() {
+	go func() { //read loop
 		defer wg.Done()
 		for {
 			msg, err := e.stream.Next(ctx) // no timeout. Graceful shutdown
@@ -105,53 +149,81 @@ func (e *BulkElastic) Start(wg *sync.WaitGroup, ctx context.Context) {
 		}
 	}()
 
-	// wg.Add(1)
-	go func() {
-		// defer wg.Done()
+	wg.Add(1)
+	go func() { // PUSH / EXEC
+		defer wg.Done()
 		errCount := 0
+		// retry := false
+		for { // push loop
+			e.cond.L.Lock()
+			for { // condition check loop
+				if e.shutdown {
+					break
+				} else if e.full && e.lastReqAt.Add(e.throttle).Before(time.Now()) {
+					break
+				} else if e.buf.Len() > 0 && e.lastReqAt.Add(e.idle).Before(time.Now()) {
+					break
+				}
+				e.cond.Wait()
+			}
+			// action
+			for err := e.exec(); err != nil; errCount++ {
+				// TODO: allow adding documents to buffer between retries.
+				time.Sleep(e.throttle)
+				if errCount >= 2 { // after 3 errors
+					e.logger.Fatal("repeating errors", zap.Error(err)) // TODO: rewrite fatal to shutdown gracefully
+				}
+			}
+
+			e.lastReqAt = time.Now()
+			e.idleTimer.Reset(e.idle)
+			e.throttleTimer.Reset(e.throttle)
+			e.full = false
+
+			if e.shutdown {
+				e.cond.L.Unlock()
+				return
+			}
+			e.cond.L.Unlock()
+		}
+	}()
+
+	wg.Add(1)
+	go func() { // "notify" ticker loop
+		defer wg.Done()
 		for {
 			select {
-			case <-ctx.Done():
-				err := e.Exec()
-				e.logger.Info("shutdown: pushing remaining buffer", zap.Error(err))
+			case <-e.idleTimer.C: // allows partial request
+				e.cond.Broadcast()
+			case <-e.throttleTimer.C: // allows full buffer request
+				e.cond.Broadcast()
+			case <-ctx.Done(): // shutdown
+				e.cond.L.Lock()
+				e.shutdown = true
+				e.cond.Broadcast()
+				e.cond.L.Unlock()
 				return
-
-			case <-e.ticker.C:
-				if err := e.Exec(); err != nil {
-					errCount++
-					if errCount >= 10 {
-						e.logger.Fatal("repeating errors", zap.Error(err)) // TODO: rewrite fatal to shutdown gracefully
-					}
-					e.logger.Error("es exec", zap.Error(err))
-				} else {
-					errCount = 0
-				}
-
 			}
 		}
 	}()
 
-	// e.ticker = time.NewTicker(e.PushPeriod)
 }
 
-func (e *BulkElastic) resetTicker() {
-	e.ticker.Reset(e.PushPeriod)
-	select {
-	case <-e.ticker.C:
-	default:
+func (e BulkElastic) push(ctx context.Context) {
+	e.cond.L.Lock()
+	for {
+
+		if e.buf.Len() > 0 {
+
+		}
 	}
-}
 
-func (e *BulkElastic) SetStream(stream *postgres.StreamPipe) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.stream = stream
+	e.cond.L.Unlock()
 }
 
 func (e *BulkElastic) Add(pos pglogrepl.LSN, buffers ...[]byte) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
+	e.cond.L.Lock()
+	defer e.cond.L.Unlock()
 	// TODO: update LSN to latest server position,
 	// even without operations on published tables
 	if len(buffers) == 0 {
@@ -164,15 +236,13 @@ func (e *BulkElastic) Add(pos pglogrepl.LSN, buffers ...[]byte) error {
 		size += len(b) + 1 // +1 for newline
 	}
 
-	// buffer is full, commit query
-	if e.buf.Cap()-e.buf.Len() < size {
-		// <-e.ticker.C // lock untill next batch time. // XXX: conflicts with Start goroutine
-		if err := e.exec(); err != nil {
-			e.logger.Error("bulk exec", zap.Error(err))
-			return err
-		}
+	// buffer is full, wait for changes
+	for e.buf.Cap()-e.buf.Len() < size {
+		e.full = true
+		e.cond.Broadcast()
+		e.cond.Wait()
 	}
-	// TODO: commit by timeout; every 30s for ex
+	e.full = false
 
 	for _, b := range buffers {
 		e.buf.Write(b)
@@ -183,12 +253,7 @@ func (e *BulkElastic) Add(pos pglogrepl.LSN, buffers ...[]byte) error {
 	return nil
 }
 
-func (e *BulkElastic) Exec() error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.exec()
-}
-
+// exec should be called with mutex locked.
 func (e *BulkElastic) exec() error {
 	// Bulk request without data will return 400 error. So, in case if there was no writes and LSN cursor hasn't changed, we skip this.
 	// However, during cold start, wee need to push a lot of data, without LSN positions.
@@ -198,8 +263,6 @@ func (e *BulkElastic) exec() error {
 		e.stream.CommitPosition(e.inqueue)
 		return nil // nothing to push
 	}
-
-	defer e.resetTicker()
 
 	// Wrapped into separate reader to make retry possible.
 	// Since buffer would read from last position, even in case of error
@@ -218,14 +281,15 @@ func (e *BulkElastic) exec() error {
 	return nil
 }
 
-type RespItemErr struct {
-	Type      string `json:"type"`
-	Reason    string `json:"reason"`
-	IndexUUID string `json:"index_uuid"` // how to decode "aAsFqTI0Tc2W0LCWgPNrOA"?
-	Shard     string `json:"shard"`      //  int as a string
-	Index     string `json:"index"`
-}
-
-func (e RespItemErr) Error() string {
-	return "[" + e.Index + "]" + e.Reason
-}
+// TODO: ignore deletes of non-existing documents
+// type RespItemErr struct {
+// Type      string `json:"type"`
+// Reason    string `json:"reason"`
+// IndexUUID string `json:"index_uuid"` // how to decode "aAsFqTI0Tc2W0LCWgPNrOA"?
+// Shard     string `json:"shard"`      //  int as a string
+// Index     string `json:"index"`
+// }
+//
+// func (e RespItemErr) Error() string {
+// return "[" + e.Index + "]" + e.Reason
+// }
