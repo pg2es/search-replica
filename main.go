@@ -13,7 +13,6 @@ package main
 import (
 	"context"
 	"flag"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -51,7 +50,6 @@ func initLogger(format, level string) (logger *zap.Logger, err error) {
 func main() {
 	var err error
 
-	defer log.Print("Our K8S in Cluster,...\nForgive us our error logs\ngive us our daily RAM\nrestart us in case of failure\n")
 	cfg := FromEnv()
 	flag.Parse()
 
@@ -157,6 +155,7 @@ func main() {
 	//
 	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		<-startupDone // wait for subscription and initial reindexing
 		// Zero value means: Get last commited position for this slot from master
 		state.Store("streaming wal")
@@ -174,10 +173,14 @@ func main() {
 	}()
 	state.Store("shutting down")
 	logger.Info("shutting down gracefully")
+	// TODO:
+	// push to elastic
+	// commit LSN to PG
+	// die
 	rootCancel() // canceling root context
 
 	// shutdown
-	wtimeout, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	wtimeout, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	server.Shutdown(wtimeout)
 	cancel()
 
