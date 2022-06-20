@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"log"
 	"sync"
 	"time"
 
@@ -83,7 +82,7 @@ func (e *BulkElastic) Start(wg *sync.WaitGroup, ctx context.Context) {
 			if err == postgres.ErrTimeout {
 				select {
 				case <-ctx.Done():
-					e.logger.Error("Elastic Loop exit")
+					e.logger.Info("shutdown: stoped accepting messages")
 					return
 				default:
 					continue
@@ -113,14 +112,17 @@ func (e *BulkElastic) Start(wg *sync.WaitGroup, ctx context.Context) {
 		for {
 			select {
 			case <-ctx.Done():
+				err := e.Exec()
+				e.logger.Info("shutdown: pushing remaining buffer", zap.Error(err))
 				return
+
 			case <-e.ticker.C:
 				if err := e.Exec(); err != nil {
-					log.Print(err)
 					errCount++
 					if errCount >= 10 {
-						e.logger.Fatal("repeating errors", zap.Error(err))
+						e.logger.Fatal("repeating errors", zap.Error(err)) // TODO: rewrite fatal to shutdown gracefully
 					}
+					e.logger.Error("es exec", zap.Error(err))
 				} else {
 					errCount = 0
 				}

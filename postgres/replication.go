@@ -173,14 +173,24 @@ func (db *Database) StartReplication(ctx context.Context, at pglogrepl.LSN) erro
 			standbyDeadline = time.Now().Add(db.StandbyTimeout)
 		}
 
-		ctx, stopDeadlineTimer := context.WithDeadline(ctx, standbyDeadline)
-		msg, err := db.replConn.ReceiveMessage(ctx)
+		// be careful with ctx shadowing
+		ctxWithDeadline, stopDeadlineTimer := context.WithDeadline(ctx, standbyDeadline)
+		msg, err := db.replConn.ReceiveMessage(ctxWithDeadline)
 		stopDeadlineTimer()
 
 		if err != nil {
 			if pgconn.Timeout(err) {
 				select {
 				case <-ctx.Done():
+					db.logger.Info("shutdown: streaming stopped")
+					if commit := db.stream.Position(); commit > prevCommit {
+						status := pglogrepl.StandbyStatusUpdate{WALWritePosition: commit}
+						ctxWithTimeout, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+						defer cancel()
+						err := pglogrepl.SendStandbyStatusUpdate(ctxWithTimeout, db.replConn, status)
+						db.logger.Info("shutdown: committed latest position", zap.String("lsn", commit.String()), zap.Error(err))
+					}
+
 					return nil // graceful exit
 				default: // non blocking continue
 				}
