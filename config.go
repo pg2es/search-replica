@@ -1,12 +1,25 @@
 package main
 
 import (
+	"flag"
 	"log"
 	"time"
 
 	"github.com/kelseyhightower/envconfig"
 	"github.com/pkg/errors"
 )
+
+var (
+	pgSlotCreate   bool
+	pgSlotReCreate bool
+	reindex        bool
+)
+
+func init() {
+	flag.BoolVar(&pgSlotCreate, "create", false, "Create new replication slot, if specified slot does not exists.")
+	flag.BoolVar(&pgSlotReCreate, "recreate", false, "Deletes slot and creates new one.")
+	flag.BoolVar(&reindex, "reindex", false, "Start with a backup to populate data into empty ES cluster (not implemented)")
+}
 
 // Config for the application.
 type Config struct {
@@ -50,6 +63,9 @@ type Config struct {
 	// LogFormat [ json (default) | cli ]
 	LogFormat string `envconfig:"LOG_FORMAT" default:"json"`
 	LogLevel  string `envconfig:"LOG_LEVEL" default:"warn"`
+
+	// Internal http API and metrics. Default 0.0.0.0:80
+	Address string `envconfig:"ADDR"`
 }
 
 // FromEnv loads the configuration from environment variables. Panics if can not config us invalid

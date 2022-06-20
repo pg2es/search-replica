@@ -13,10 +13,22 @@ import (
 	"github.com/jackc/pgproto3/v2"
 	"github.com/jackc/pgtype"
 	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
 
 const outputPlugin = "pgoutput" // important
+
+var (
+	metricMessages = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "streaming_messages",
+		Help: "Wall decoded messages received in streaming replication",
+	}, []string{"operation", "table"})
+)
+
+func init() {
+	prometheus.MustRegister(metricMessages)
+}
 
 func pgconnConfig() (*pgconn.Config, error) {
 	config, err := pgconn.ParseConfig("") // falback to parsing env variables
@@ -144,10 +156,11 @@ func (db *Database) StartReplication(ctx context.Context, at pglogrepl.LSN) erro
 	standbyDeadline := time.Now().Add(db.StandbyTimeout)
 	db.logger.Info("Started streaming replication")
 
-	prevCommit := db.LSN()
+	prevCommit := db.stream.Position()
 	for {
+		// TODO: exit on <- ctx.Done()
 		if time.Now().After(standbyDeadline) {
-			commit := db.LSN()
+			commit := db.stream.Position()
 			status := pglogrepl.StandbyStatusUpdate{WALWritePosition: commit}
 			err := pglogrepl.SendStandbyStatusUpdate(ctx, db.replConn, status)
 			if err != nil { // TODO: add few retries
@@ -166,8 +179,14 @@ func (db *Database) StartReplication(ctx context.Context, at pglogrepl.LSN) erro
 
 		if err != nil {
 			if pgconn.Timeout(err) {
+				select {
+				case <-ctx.Done():
+					return nil // graceful exit
+				default: // non blocking continue
+				}
 				continue // Deadline to do a standby status update
 			}
+			// maybe <- ctx.Done() would work here
 			db.logger.Fatal("failed to receive message", zap.Error(err))
 		}
 
@@ -182,7 +201,7 @@ func (db *Database) StartReplication(ctx context.Context, at pglogrepl.LSN) erro
 				if pkm.ReplyRequested {
 					standbyDeadline = time.Time{}
 				}
-				db.results <- Document{LSN: pkm.ServerWALEnd}
+				db.stream.add(Position(pkm.ServerWALEnd))
 
 			case pglogrepl.XLogDataByteID:
 				xld, err := pglogrepl.ParseXLogData(msg.Data[1:])
@@ -212,6 +231,7 @@ func must(data []byte, err error) []byte {
 }
 
 func (db *Database) HandleLogical(ctx context.Context, lsn pglogrepl.LSN, msg pglogrepl.Message) error {
+	pos := Position(lsn)
 	switch v := msg.(type) {
 	case *pglogrepl.BeginMessage:
 	case *pglogrepl.CommitMessage:
@@ -223,6 +243,8 @@ func (db *Database) HandleLogical(ctx context.Context, lsn pglogrepl.LSN, msg pg
 	case *pglogrepl.RelationMessage:
 		table := db.schema(v.Namespace).table(v.RelationName)
 		table.SetRelationID(v.RelationID)
+		metricMessages.WithLabelValues("metadata", table.name).Inc()
+
 		for pos, relcol := range v.Columns {
 			col := table.Column(relcol.Name)
 			// ... relcol.Flags&1 != 0  means PK
@@ -238,50 +260,58 @@ func (db *Database) HandleLogical(ctx context.Context, lsn pglogrepl.LSN, msg pg
 
 	case *pglogrepl.InsertMessage:
 		table := db.relation(v.RelationID)
+		metricMessages.WithLabelValues("insert", table.name).Inc()
 
 		table.decodeTuple(v.Tuple)
 		if table.index {
 			meta := must(table.elasticBulkHeader(ESIndex))
 			data := must(table.MarshalJSON())
-			db.results <- Document{LSN: lsn, Meta: meta, Data: data}
+			db.stream.add(Document{Position: pos, Meta: meta, Data: data})
 		}
 
 		for _, inl := range table.isInlinedIn {
 			meta, _ := inl.elasticBulkHeader(ESUpdate)
 			data, _ := inl.jsonAddScript()
-			db.results <- Document{LSN: lsn, Meta: meta, Data: data}
+			db.stream.add(Document{Position: pos, Meta: meta, Data: data})
 		}
 
 	case *pglogrepl.UpdateMessage:
 		table := db.relation(v.RelationID)
+		metricMessages.WithLabelValues("update", table.name).Inc()
 		// TODO: If PK or Routing field was changed, procceed with delete & insert pair. Also checking for table.insertOnly.
 		// if !table.insertOnly && () {
 		// oldRow := rowFromPGTuple(v.OldTuple)
-		// if table.keysChanged(oldRow, row)
-		// }
+
+		action := ESUpdate
+		if table.index && !table.upsertOnly && v.OldTuple != nil && table.tupleKeysChanged(v.OldTuple, v.NewTuple) {
+			table.decodeTuple(v.OldTuple)
+			meta := must(table.elasticBulkHeader(ESDelete))
+			db.stream.add(Document{Position: pos, Meta: meta})
+			action = ESIndex
+		}
 
 		table.decodeTuple(v.NewTuple)
-
 		// XXX: ESUpdate is correct here, and would work fine assuming that data is consistent.
 		if table.index {
-			meta := must(table.elasticBulkHeader(ESUpdate))
+			meta := must(table.elasticBulkHeader(action))
 			data := must(table.EncodeUpdateRowJSON())
-			db.results <- Document{LSN: lsn, Meta: meta, Data: data}
+			db.stream.add(Document{Position: pos, Meta: meta, Data: data})
 		}
 
 		for _, inl := range table.isInlinedIn {
 			meta := must(inl.elasticBulkHeader(ESUpdate))
 			data := must(inl.jsonAddScript())
-			db.results <- Document{LSN: lsn, Meta: meta, Data: data}
+			db.stream.add(Document{Position: pos, Meta: meta, Data: data})
 		}
 
 	case *pglogrepl.DeleteMessage:
 		table := db.relation(v.RelationID)
+		metricMessages.WithLabelValues("delete", table.name).Inc()
 		table.decodeTuple(v.OldTuple)
 
 		if table.index && !table.upsertOnly {
 			meta := must(table.elasticBulkHeader(ESDelete))
-			db.results <- Document{LSN: lsn, Meta: meta}
+			db.stream.add(Document{Position: pos, Meta: meta})
 		}
 
 		for _, inl := range table.isInlinedIn {
@@ -290,7 +320,7 @@ func (db *Database) HandleLogical(ctx context.Context, lsn pglogrepl.LSN, msg pg
 			}
 			meta := must(inl.elasticBulkHeader(ESUpdate))
 			data := must(inl.jsonDelScript())
-			db.results <- Document{LSN: lsn, Meta: meta, Data: data}
+			db.stream.add(Document{Position: pos, Meta: meta, Data: data})
 		}
 
 	case *pglogrepl.TruncateMessage:

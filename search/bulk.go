@@ -3,6 +3,7 @@ package search
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log"
 	"sync"
 	"time"
@@ -10,8 +11,28 @@ import (
 	"github.com/jackc/pglogrepl"
 	"github.com/pg2es/search-replica/postgres"
 	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
+
+var (
+	metricMessageCount = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "search_doc_operations",
+		Help: "number of doc index/update/deletes",
+	})
+	metricMessageSize = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "search_doc_size",
+		Help: "Total size of JSON that was pushed to elastic",
+	})
+	// docs per request
+	// request time
+	// errors // retries
+)
+
+func init() {
+	prometheus.MustRegister(metricMessageCount)
+	prometheus.MustRegister(metricMessageSize)
+}
 
 // TODO: https://github.com/elastic/go-elasticsearch/blob/master/_examples/bulk/indexer.go
 
@@ -19,14 +40,14 @@ type BulkElastic struct {
 	BufferSize int // in bytes
 	PushPeriod time.Duration
 
-	Config *postgres.Database
-
+	stream *postgres.StreamPipe
 	client *Client
 
 	wg     sync.WaitGroup
 	mu     sync.Mutex
 	buf    *bytes.Buffer
 	ticker *time.Ticker
+	// todo add throthling period (ticker)
 
 	// cond sync.Cond
 
@@ -45,20 +66,54 @@ func (e *BulkElastic) Connect(ctx context.Context, host, username, password stri
 	return errors.Wrap(err, "connecting to Search")
 }
 
-func (e *BulkElastic) Start() {
+func (e *BulkElastic) Start(wg *sync.WaitGroup, ctx context.Context) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	buf := make([]byte, 0, e.BufferSize)
 	e.buf = bytes.NewBuffer(buf)
 	e.ticker = time.NewTicker(e.PushPeriod)
-
 	// testing cond
 	// e.cond = *sync.NewCond(&sync.Mutex{})
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
+		for {
+			msg, err := e.stream.Next(ctx) // no timeout. Graceful shutdown
+			if err == postgres.ErrTimeout {
+				select {
+				case <-ctx.Done():
+					e.logger.Error("Elastic Loop exit")
+					return
+				default:
+					continue
+				}
+			}
+
+			if err != nil { // postgres.ErrTimeout
+				e.logger.Error("Recv message error", zap.Error(err))
+				return
+			}
+			if doc, ok := msg.(postgres.Document); ok {
+				metricMessageCount.Inc()
+				e.logger.Debug("document",
+					zap.Any("meta", json.RawMessage(doc.Meta)),
+					zap.Any("data", json.RawMessage(doc.Data)),
+				)
+			}
+
+			e.Add(msg.LSN(), msg.NDJSON()...)
+		}
+	}()
+
+	// wg.Add(1)
+	go func() {
+		// defer wg.Done()
 		errCount := 0
 		for {
 			select {
+			case <-ctx.Done():
+				return
 			case <-e.ticker.C:
 				if err := e.Exec(); err != nil {
 					log.Print(err)
@@ -85,10 +140,10 @@ func (e *BulkElastic) resetTicker() {
 	}
 }
 
-func (e *BulkElastic) SetCfg(cfg *postgres.Database) {
+func (e *BulkElastic) SetStream(stream *postgres.StreamPipe) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.Config = cfg
+	e.stream = stream
 }
 
 func (e *BulkElastic) Add(pos pglogrepl.LSN, buffers ...[]byte) error {
@@ -111,7 +166,7 @@ func (e *BulkElastic) Add(pos pglogrepl.LSN, buffers ...[]byte) error {
 	if e.buf.Cap()-e.buf.Len() < size {
 		// <-e.ticker.C // lock untill next batch time. // XXX: conflicts with Start goroutine
 		if err := e.exec(); err != nil {
-			log.Print(err)
+			e.logger.Error("bulk exec", zap.Error(err))
 			return err
 		}
 	}
@@ -136,9 +191,9 @@ func (e *BulkElastic) exec() error {
 	// Bulk request without data will return 400 error. So, in case if there was no writes and LSN cursor hasn't changed, we skip this.
 	// However, during cold start, wee need to push a lot of data, without LSN positions.
 	// TODO: Improve bulk handling and buffers
-	committed := e.Config.LSN()
+	committed := e.stream.Position()
 	if e.buf.Len() == 0 || (e.inqueue != pglogrepl.LSN(0) && committed == e.inqueue) {
-		e.Config.CommitLSN(e.inqueue)
+		e.stream.CommitPosition(e.inqueue)
 		return nil // nothing to push
 	}
 
@@ -150,12 +205,14 @@ func (e *BulkElastic) exec() error {
 
 	size := e.buf.Len()
 	if err := e.client.Bulk(body); err != nil {
+		// e.logger.Fatal("Failed ES Request", zap.Any("body", json.RawMessage(e.buf.Bytes())))
 		return errors.Wrap(err, "commit bulk request")
 	}
 
-	e.Config.CommitLSN(e.inqueue)
+	e.stream.CommitPosition(e.inqueue)
+	metricMessageSize.Add(float64(e.buf.Len()))
 	e.buf.Reset()
-	e.logger.Info("pushed pulk requestd", zap.Int("size", size), zap.String("LSN", e.inqueue.String()))
+	e.logger.Info("pushed bulk request", zap.Int("size", size), zap.String("LSN", e.inqueue.String()))
 	return nil
 }
 

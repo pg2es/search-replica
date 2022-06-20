@@ -84,8 +84,7 @@ func (p *Parser) Parse(r io.Reader) error {
 		for i := 0; i < int(tupleLen); i++ {
 			colLen := readInt32(r)
 			if colLen == -1 {
-				row[i] = nil // nil is default, may be omitted
-				continue
+				continue // column is nil
 			}
 			row[i] = make([]byte, colLen)
 			if _, err := io.ReadFull(r, row[i]); err != nil {

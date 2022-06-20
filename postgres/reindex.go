@@ -4,19 +4,34 @@ import (
 	"context"
 	"io"
 	"sync"
-	"time"
 
 	"github.com/jackc/pgconn"
 	"github.com/jackc/pglogrepl"
 	"github.com/pg2es/search-replica/postgres/pgcopy"
 	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
+
+var (
+	metricCopyRows = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "copy_messages",
+		Help: "Initial rows received via COPY",
+	}, []string{"table"})
+)
+
+func init() {
+	prometheus.MustRegister(metricCopyRows)
+}
 
 // Selects all rown from table, and populates results into Database.results chanel.
 // Copy existing data snapshoted by slot creation, using simple protocol.
 func (t *Table) CopyAll(ctx context.Context, conn *pgconn.PgConn) error {
 	t.init()
+
+	// TODO: configurable
+	// ctx, cancel := context.WithTimeout(ctx, 1000*time.Second)
+	// defer cancel()
 
 	q := t.copyQuery()
 	t.logger.Info("COPYing snapshot", zap.String("sql", q))
@@ -24,31 +39,31 @@ func (t *Table) CopyAll(ctx context.Context, conn *pgconn.PgConn) error {
 	// buf := &bytes.Buffer{}
 	pipeReader, pipeWriter := io.Pipe()
 	wg := &sync.WaitGroup{}
+
 	wg.Add(2)
 	defer wg.Wait()
 
 	parser := pgcopy.NewParser()
 	go func() {
+		defer wg.Done()
 		err := parser.Parse(pipeReader)
 		if err != nil {
 			t.logger.Error("parser error", zap.Error(err))
 		}
-		wg.Done()
 	}()
 
 	go func() {
-		cmd, err := conn.CopyTo(ctx, pipeWriter, q)
+		defer wg.Done()
 		defer pipeWriter.Close()
+		cmd, err := conn.CopyTo(ctx, pipeWriter, q)
 		if err != nil {
 			t.logger.Error("copy to", zap.Error(err))
 		}
-		t.logger.Info("copy to CMD handler", zap.Int64("rows", cmd.RowsAffected()))
-		wg.Done()
+		t.logger.Info("copied to CMD handler", zap.Int64("rows", cmd.RowsAffected()))
 	}()
 
-	// TODO: configurable
-	ctx, cancel := context.WithTimeout(ctx, 100*time.Second)
-	defer cancel()
+	tableRows := metricCopyRows.WithLabelValues(t.name)
+	stream := t.schema.database.stream // shortcut
 
 	for {
 		row, err := parser.Next(ctx)
@@ -58,6 +73,7 @@ func (t *Table) CopyAll(ctx context.Context, conn *pgconn.PgConn) error {
 		if err != nil {
 			return errors.Wrap(err, "copy from")
 		}
+		tableRows.Inc()
 
 		err = t.decodeRow(row, pglogrepl.TupleDataTypeBinary)
 		if err != nil {
@@ -67,12 +83,12 @@ func (t *Table) CopyAll(ctx context.Context, conn *pgconn.PgConn) error {
 		if t.index {
 			meta, _ := t.elasticBulkHeader(ESIndex)
 			data, _ := t.MarshalJSON()
-			t.schema.database.results <- Document{LSN: 0, Meta: meta, Data: data}
+			stream.add(Document{Meta: meta, Data: data})
 		}
 		for _, inl := range t.isInlinedIn {
 			meta, _ := inl.elasticBulkHeader(ESUpdate)
 			data, _ := inl.jsonAddScript()
-			t.schema.database.results <- Document{LSN: 0, Meta: meta, Data: data}
+			stream.add(Document{Meta: meta, Data: data})
 		}
 	}
 }
