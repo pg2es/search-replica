@@ -2,10 +2,8 @@ package postgres
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgconn"
@@ -15,15 +13,14 @@ import (
 	"go.uber.org/zap"
 )
 
-func New(logger *zap.Logger) *Database {
+func New(stream *StreamPipe, logger *zap.Logger) *Database {
 	return &Database{
 		schemas:        make(map[string]*Schema),
 		relationSet:    make(map[uint32]*Table),
-		results:        make(chan Document),
 		StandbyTimeout: 10 * time.Second,
 		logger:         logger,
-
-		connInfo: pgtype.NewConnInfo(),
+		stream:         stream,
+		connInfo:       pgtype.NewConnInfo(),
 	}
 }
 
@@ -44,45 +41,8 @@ type Database struct {
 	StandbyTimeout time.Duration
 	committedLSN   pglogrepl.LSN
 
-	logger  *zap.Logger
-	results chan Document
-}
-
-func (db *Database) CommitLSN(lsn pglogrepl.LSN) {
-	atomic.StoreUint64((*uint64)(&db.committedLSN), uint64(lsn))
-}
-func (db *Database) LSN() pglogrepl.LSN {
-	return pglogrepl.LSN(atomic.LoadUint64((*uint64)(&db.committedLSN)))
-}
-
-// Document represents one single operation in bulk request.
-type Document struct {
-	LSN  pglogrepl.LSN
-	Meta []byte // Op type, index and document id
-	Data []byte // document content or script
-}
-
-var (
-	ErrTimeout  = errors.New("timeout")
-	ErrChClosed = errors.New("document channel is closed")
-)
-
-func (db *Database) NextMessage(ctx context.Context) (Document, error) {
-	select {
-	case doc, ok := <-db.results:
-		if !ok {
-			return Document{}, ErrChClosed
-		}
-		if len(doc.Meta)+len(doc.Data) > 0 {
-			db.logger.Debug("doc", zap.Stringer("position", doc.LSN),
-				zap.Any("body", json.RawMessage(doc.Data)),
-				zap.Any("head", json.RawMessage(doc.Meta)),
-			)
-		}
-		return doc, nil
-	case <-ctx.Done():
-		return Document{}, ErrTimeout
-	}
+	stream *StreamPipe
+	logger *zap.Logger
 }
 
 // indexableTables returns filtered list of tables, that's are subject to be indexed

@@ -14,11 +14,16 @@ import (
 	"context"
 	"flag"
 	"log"
-	"sync/atomic"
+	"net/http"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pglogrepl"
 	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
@@ -26,24 +31,9 @@ import (
 	"github.com/pg2es/search-replica/search"
 )
 
-const OutputPlugin = "pgoutput" // important
-
 var Version = "master"
 
-var (
-	pgSlotCreate   bool
-	pgSlotReCreate bool
-	reindex        bool
-)
-
-func init() {
-	flag.BoolVar(&pgSlotCreate, "create", false, "Create new replication slot, if specified slot does not exists.")
-	flag.BoolVar(&pgSlotReCreate, "recreate", false, "Deletes slot and creates new one.")
-	flag.BoolVar(&reindex, "reindex", false, "Start with a backup to populate data into empty ES cluster (not implemented)")
-}
-
 func initLogger(format, level string) (logger *zap.Logger, err error) {
-
 	cfg := zap.NewProductionConfig() // default
 	if format == "cli" {
 		cfg = zap.NewDevelopmentConfig()
@@ -69,11 +59,12 @@ func main() {
 	defer logger.Sync()
 	logger.Info("Starting the SearchReplica", zap.String("version", Version))
 
-	ctx := context.Background()
+	ctx, rootCancel := context.WithCancel(context.Background())
+	wg := &sync.WaitGroup{}
 	// TODO: waitgroups and gracefull shutdown
 
 	searchClient := &search.BulkElastic{
-		BufferSize: 1024 * 1024 * cfg.Search.BulkSizeLimit, // Good one would be 4-8mb; limit ~100MB
+		BufferSize: cfg.Search.BulkSizeLimit << 20, // Good one would be 4-8mb; limit ~100MB
 		PushPeriod: cfg.Search.PushInterval,
 	}
 	searchClient.Logger(logger)
@@ -83,9 +74,12 @@ func main() {
 	if err := searchClient.PrepareScripts(); err != nil {
 		logger.Fatal(err.Error())
 	}
-	searchClient.Start()
 
-	db := postgres.New(logger)
+	stream := postgres.NewStreamPipe(ctx)
+	searchClient.SetStream(stream)
+	searchClient.Start(wg, ctx)
+
+	db := postgres.New(stream, logger)
 	db.SlotName = cfg.Postgres.Slot
 	db.Publication = cfg.Postgres.Publication
 	if err := db.Connect(ctx); err != nil { // This will implicitly use PG* env variables
@@ -97,87 +91,96 @@ func main() {
 		logger.Fatal(errors.Wrap(err, "discover config").Error())
 	}
 
-	searchClient.SetCfg(db)
+	db.RegisterSlotLagMetric(ctx)
 	db.PrintSatus()
 
-	var msgCounter uint64
-	var msgCounterAll uint64
-	go func() {
-		for {
-			msg, err := db.NextMessage(ctx)
-			if err != nil {
-				logger.Error("Recv message error", zap.Error(err))
-				break
-			}
-			if len(msg.Meta) > 0 { // ignore LSN standby updates
-				atomic.AddUint64(&msgCounter, 1)
-				atomic.AddUint64(&msgCounterAll, 1)
-			}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/state", stateFunc)
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not implemented", http.StatusNotImplemented)
+	})
+	mux.Handle("/metrics", promhttp.Handler())
+	server := http.Server{
+		Addr:    cfg.Address,
+		Handler: mux,
+	}
 
-			if len(msg.Data) > 0 {
-				searchClient.Add(msg.LSN, msg.Meta, msg.Data)
-				continue
+	//
+	// API & Metrics
+	//
+	wg.Add(1)
+	go func() {
+		if err := server.ListenAndServe(); err != http.ErrServerClosed {
+			logger.Error("API server closed with error", zap.Error(err))
+		} // TODO: tls?
+		wg.Done()
+	}()
+
+	startupDone := make(chan struct{})
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer state.Store("started up")
+		defer close(startupDone) // unlock streaming replication
+
+		pgSlotReCreate = pgSlotReCreate || reindex
+		if pgSlotReCreate {
+			db.DropReplicationSlot(ctx)
+			pgSlotCreate = true
+		}
+		// During slot creation, Postgres also make a spanshot of a database. Freezeng a state for the following COPY command  or backup. Snapshot is available within this transaction.
+		if err := db.Tx(ctx); err != nil {
+			logger.Fatal("start transaction", zap.Error(err))
+		}
+		if pgSlotCreate {
+			db.CreateReplicationSlot(ctx)
+		}
+
+		if reindex {
+			logger.Info("REINDEXING DATA")
+			state.Store("reindexing")
+			if err := db.Reindex(ctx); err != nil { // blocking; should be called in same transaction as slot creation
+				logger.Fatal("reindexing failed", zap.Error(err))
 			}
-			if len(msg.Meta) > 0 { // E.G: delete
-				searchClient.Add(msg.LSN, msg.Meta)
-				continue
-			}
-			searchClient.Add(msg.LSN)
+			state.Store("reindexing: done")
+		}
+
+		// After copying snapshot, which represents slot state, we should finish transaction before streaming replication
+		if err := db.Commit(ctx); err != nil {
+			logger.Fatal("commit transaction", zap.Error(err))
 		}
 	}()
 
+	//
+	// Replication
+	//
+	wg.Add(1)
 	go func() {
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			count := atomic.SwapUint64(&msgCounter, 0)
-			countAll := atomic.LoadUint64(&msgCounterAll)
-			if count > 0 {
-				logger.Info("forwarded messages", zap.Uint64("last", count), zap.Uint64("all", countAll))
-			}
+		<-startupDone // wait for subscription and initial reindexing
+		// Zero value means: Get last commited position for this slot from master
+		state.Store("streaming wal")
+		if err = db.StartReplication(ctx, pglogrepl.LSN(0)); err != nil {
+			logger.Fatal("replication error", zap.Error(err))
 		}
 	}()
 
-	if pgSlotReCreate {
-		db.DropReplicationSlot(ctx)
-		pgSlotCreate = true
-	}
-	// During slot creation, Postgres also make a spanshot of a database. Freezeng a state for the following COPY command  or backup. Snapshot is available within this transaction.
-	if err := db.Tx(ctx); err != nil {
-		logger.Fatal("start transaction", zap.Error(err))
-	}
-	if pgSlotCreate {
-		db.CreateReplicationSlot(ctx)
-	}
-
-	if reindex {
-		logger.Info("REINDEXING DATA")
-		if err := db.Reindex(ctx); err != nil { // blocking; should be called in same transaction as slot creation
-			logger.Fatal("reindexing failed", zap.Error(err))
-		}
-	}
-
-	// After copying snapshot, which represents slot state, we should finish transaction before streaming replication
-	if err := db.Commit(ctx); err != nil {
-		logger.Fatal("commit transaction", zap.Error(err))
-	}
-
-	// TODO: move to metrics
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+	<-ch // lock here
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-
-		for _ = range ticker.C {
-			if err := db.Lag(ctx); err != nil {
-				logger.Error("check lag", zap.Error(err)) // TODO: periodiacl check
-			}
-		}
+		<-ch
+		logger.Fatal("received second signal; Dying now!")
 	}()
+	state.Store("shutting down")
+	logger.Info("shutting down gracefully")
+	rootCancel() // canceling root context
 
-	startAt := pglogrepl.LSN(0)             //Zero value means: Get last commited position for this slot from master
-	err = db.StartReplication(ctx, startAt) // blocking
-	if err != nil {
-		logger.Fatal("replication error", zap.Error(err))
-	}
+	// shutdown
+	wtimeout, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	server.Shutdown(wtimeout)
+	cancel()
+
+	wg.Wait()
 
 }

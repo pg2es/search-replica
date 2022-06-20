@@ -60,15 +60,6 @@ func (kv stringKV) MarshalJSON() ([]byte, error) {
 	return []byte(strconv.Quote(kv.value)), nil // TODO proper marshaling
 }
 
-// not sure if useful.
-// type renameKV struct {
-// jsonKV
-// name string
-// }
-// func (rename renameKV) jsonKey() string {
-// return rename.name
-// }
-
 // real and ephemeral columns. Document KVs
 type jsonKV interface {
 	jsonKey() string

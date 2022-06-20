@@ -68,6 +68,20 @@ func (t *Table) keysChanged(oldRow, newRow [][]byte) bool {
 	return false
 }
 
+// tupleKeysChanged tells whether document needs to be recreated
+func (t *Table) tupleKeysChanged(oldTuple, newTuple *pglogrepl.TupleData) bool {
+	if !bytes.Equal(
+		oldTuple.Columns[t.pkCol.pos].Data,
+		newTuple.Columns[t.pkCol.pos].Data,
+	) {
+		return true
+	}
+	if t.routingCol != nil && !bytes.Equal(newTuple.Columns[t.routingCol.pos].Data, oldTuple.Columns[t.routingCol.pos].Data) {
+		return true
+	}
+	return false
+}
+
 func (t *Table) decodeRow(row [][]byte, dataType uint8) error {
 	var empty bool
 	for _, col := range t.indexColumns() {
