@@ -11,10 +11,10 @@ RUN go mod download
 
 # build static binary
 COPY . .
-ARG COMMIT="develop"
+ARG VERSION="develop"
 ARG TARGETOS TARGETARCH
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
-    go build -o /bin/pg2es -a -ldflags "-w -X main.Version=${COMMIT}" ./
+    go build -o /bin/pg2es -a -ldflags "-w -X main.Version=${VERSION}" ./
 
 # This results in a single layer image
 FROM scratch
