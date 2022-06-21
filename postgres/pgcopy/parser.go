@@ -1,5 +1,10 @@
 // package pgcopy - parser for PostgreSQL `COPY TO ... WITH BINARY` command result
-// FileFormat: https://www.postgresql.org/docs/current/sql-copy.html#id-1.9.3.55.9.4.5
+//
+// FileFormat Docs: https://www.postgresql.org/docs/14/sql-copy.html#id-1.9.3.55.9.4.5
+//
+// If docs are confusing, check sources instead:
+// metadata and headers: https://github.com/postgres/postgres/blob/26b3455/src/backend/commands/copyto.c#L824-L834
+// row/tuple implementation: https://github.com/postgres/postgres/blob/26b3455/src/backend/commands/copyto.c#L931-L1000
 package pgcopy
 
 import (
