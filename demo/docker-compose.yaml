@@ -24,6 +24,8 @@ services:
       # Initialization scripts. See: https://hub.docker.com/_/postgres/
       - ./schema.sql:/docker-entrypoint-initdb.d/00-schema.sql:ro 
       - ./import.sql:/docker-entrypoint-initdb.d/01-import.sql:ro
+    networks:
+      - crossconnect
   pgadmin:
     container_name: pg2es-pgadmin
     image: dpage/pgadmin4:6
@@ -31,17 +33,37 @@ services:
     environment:
       PGADMIN_DEFAULT_EMAIL: demo@demo.com
       PGADMIN_DEFAULT_PASSWORD: demo
+      PGADMIN_CONFIG_SERVER_MODE: "False"              # python value
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False" # python value
+    volumes:
+       - ./pgadmin/servers.json:/pgadmin4/servers.json # preconfigured servers/connections
+       - ./pgadmin/pgpass:/pgpass # passwords for the connections in this file
+    networks:
+      - crossconnect
+    ports: # expose
+      - "8081:80"
+  searchui:
+    image: cars10/elasticvue:0.40.1
+    container_name: pg2es-search-ui
     ports:
-      - "5000:80"
-
+      - 8080:8080
+    depends_on:
+      - elasticsearch
+    networks:
+      - crossconnect
 
     # Elasticsearch Docker Images: https://www.docker.elastic.co/
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:7.10.2  # 7.10 is latest, where OpenSearch & ElasticSearch were compatible.
     container_name: pg2es-elasticsearch
     environment:
-      - xpack.security.enabled=false
-      - discovery.type=single-node
+      discovery.type: single-node
+      xpack.security.enabled: 'false'
+      xpack.monitoring.enabled: 'false'
+      http.cors.enabled : 'true'
+      http.cors.allow-origin : '*'
+      http.cors.allow-methods : OPTIONS, HEAD, GET, POST, PUT, DELETE
+      http.cors.allow-headers : X-Requested-With,X-Auth-Token,Content-Type,Content-Length,Authorization
     ulimits:
       memlock: {soft: -1, hard: -1}
       nofile: {soft: 65536, hard: 65536}
@@ -51,10 +73,16 @@ services:
       - elasticsearch-data:/usr/share/elasticsearch/data
     ports:
       - 9200:9200
+    networks: 
+      - crossconnect
+        
   searchsetup:
     image: curlimages/curl
+    container_name: pg2es-searchsetup
     depends_on:
       - elasticsearch
+    networks: 
+      - crossconnect
     restart: "on-failure"
     command: >-
       curl -X PUT -k -H 'Content-Type: application/json' -d @/tmp/postgres.json http://elasticsearch:9200/postgres
@@ -62,9 +90,11 @@ services:
       - ./mapping.json:/tmp/postgres.json:ro
   search-replica:
     build: ../
-    # image: pg2es/search-replica:latest
+    image: pg2es/search-replica:latest
     container_name: pg2es-search-replica
     restart: "on-failure"
+    networks:
+      - crossconnect
     depends_on:
       - elasticsearch
       - searchsetup
@@ -88,4 +118,6 @@ volumes:
     driver: local
   postgres-data:
     driver: local
-
+networks:
+  crossconnect:
+    driver: bridge
