@@ -168,7 +168,7 @@ func (db *Database) StartReplication(ctx context.Context, at pglogrepl.LSN) erro
 			}
 			if commit > prevCommit {
 				prevCommit = commit
-				db.logger.Info("Commited LSN", zap.Stringer("lsn", commit))
+				db.logger.Debug("Commited LSN", zap.Stringer("lsn", commit))
 			}
 			standbyDeadline = time.Now().Add(db.StandbyTimeout)
 		}
@@ -188,7 +188,7 @@ func (db *Database) StartReplication(ctx context.Context, at pglogrepl.LSN) erro
 						ctxWithTimeout, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 						defer cancel()
 						err := pglogrepl.SendStandbyStatusUpdate(ctxWithTimeout, db.replConn, status)
-						db.logger.Info("shutdown: committed latest position", zap.String("lsn", commit.String()), zap.Error(err))
+						db.logger.Debug("shutdown: committed latest position", zap.String("lsn", commit.String()), zap.Error(err))
 					}
 
 					return nil // graceful exit
