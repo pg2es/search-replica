@@ -38,7 +38,7 @@ func initLogger(format, level string) (logger *zap.Logger, err error) {
 		cfg = zap.NewDevelopmentConfig()
 	}
 
-	// cfg.DisableCaller = true // disable file:line
+	cfg.DisableCaller = true // disable file:line
 	cfg.DisableStacktrace = true
 	cfg.Level, err = zap.ParseAtomicLevel(level)
 	if err != nil {
@@ -71,8 +71,7 @@ func main() {
 		IdleInterval: cfg.Search.PushInterval,
 		Logger:       logger,
 		Stream:       stream,
-		// Throttle:  TODO: expose config
-
+		Throttle:     cfg.Search.PushThrottle,
 	})
 	if err != nil {
 		logger.Fatal(err.Error())

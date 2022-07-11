@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/pkg/errors"
+	"go.uber.org/zap"
 )
 
 type Credentials struct {
@@ -20,9 +21,10 @@ type Credentials struct {
 	set      bool
 }
 
-func NewClient(host, username, password string) (c *Client, err error) {
+func NewClient(host, username, password string, logger *zap.Logger) (c *Client, err error) {
 	c = &Client{
 		Client: *http.DefaultClient,
+		logger: logger,
 	}
 
 	// default scheme, before parsing. Otherwise domain name would be parsed as relative path url
@@ -56,6 +58,7 @@ type Client struct {
 	credentials Credentials
 	Host        *url.URL
 	throttle    bool
+	logger      *zap.Logger
 }
 
 // Do wraps default http.Client.Do with authorization
@@ -71,7 +74,8 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 func (c *Client) Bulk(body io.Reader) error {
 	addr := c.Host.ResolveReference(&url.URL{
 		Path:     "/_bulk",
-		RawQuery: "filter_path=errors", // ?filter_path=items.*.error,errors
+		RawQuery: "filter_path=items.*.error,errors",
+		// RawQuery: "filter_path=errors", // ?filter_path=items.*.error,errors
 	})
 
 	body = io.MultiReader(body, bytes.NewReader([]byte{'\n'})) // Additional "termination" newline means end of a batch
@@ -103,6 +107,7 @@ func (c *Client) Bulk(body io.Reader) error {
 	// Response is filtered out by `filter_path` query parameter.Here we do not care about per-item results. Even in case of a single error, we loose consistency, so best case would be to fail and retry request, or restart script
 	respVal := struct {
 		Errors bool `json:"errors"`
+		Items  json.RawMessage
 		// Items - ignored; pottentialy can be used for stats and debug logging.
 	}{}
 
@@ -113,6 +118,7 @@ func (c *Client) Bulk(body io.Reader) error {
 	}
 
 	if respVal.Errors {
+		c.logger.Warn("reponse errors", zap.Any("data", respVal.Items))
 		return errors.New("commit bulk returned errors")
 	}
 
