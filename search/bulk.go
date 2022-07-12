@@ -226,10 +226,11 @@ func (e *BulkElastic) Start(wg *sync.WaitGroup, ctx context.Context) {
 			}
 			// action
 			for err := e.exec(); err != nil; errCount++ {
+				e.logger.Warn("retrying", zap.Int("attempt", errCount+1), zap.Error(err))
 				// TODO: allow adding documents to buffer between retries.
 				time.Sleep(e.throttle)
 				if errCount >= 2 { // after 3 errors
-					e.logger.Fatal("repeating errors", zap.Error(err)) // TODO: rewrite fatal to shutdown gracefully
+					e.logger.Fatal("repeating errors", zap.Int("attempt", errCount+1), zap.Error(err))
 				}
 			}
 
@@ -333,7 +334,6 @@ func (e *BulkElastic) exec() error {
 	body := bytes.NewReader(e.buf.Bytes())
 
 	if err := e.client.Bulk(body); err != nil {
-		// e.logger.Fatal("Failed ES Request", zap.Any("body", json.RawMessage(e.buf.Bytes())))
 		return errors.Wrap(err, "commit bulk request")
 	}
 
@@ -345,16 +345,3 @@ func (e *BulkElastic) exec() error {
 	e.logger.Info("pushed bulk request", zap.Int("size", size), zap.String("LSN", e.inqueue.String()))
 	return nil
 }
-
-// TODO: ignore deletes of non-existing documents
-// type RespItemErr struct {
-// Type      string `json:"type"`
-// Reason    string `json:"reason"`
-// IndexUUID string `json:"index_uuid"` // how to decode "aAsFqTI0Tc2W0LCWgPNrOA"?
-// Shard     string `json:"shard"`      //  int as a string
-// Index     string `json:"index"`
-// }
-//
-// func (e RespItemErr) Error() string {
-// return "[" + e.Index + "]" + e.Reason
-// }

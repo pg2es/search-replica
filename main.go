@@ -72,6 +72,7 @@ func main() {
 		Logger:       logger,
 		Stream:       stream,
 		Throttle:     cfg.Search.PushThrottle,
+		Debounce:     cfg.Search.PushDebounce,
 	})
 	if err != nil {
 		logger.Fatal(err.Error())

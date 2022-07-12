@@ -109,6 +109,7 @@ services:
       SEARCH_HOST: "http://elasticsearch:9200"
       SEARCH_BULK_SIZE: 4
       SEARCH_PUSH_INTERVAL: 1s
+      SEARCH_PUSH_DEBOUNCE: 250ms
       LOG_LEVEL: "debug"
       LOG_FORMAT: "cli"
     entrypoint: ["/bin/pg2es", "-recreate", "-reindex"]
