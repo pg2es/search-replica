@@ -58,6 +58,8 @@ type Config struct {
 		BulkSizeLimit int `envconfig:"SEARCH_BULK_SIZE" default:"4"`
 		// PushInterval between bulk requests to the search engine.
 		PushInterval time.Duration `envconfig:"SEARCH_PUSH_INTERVAL" default:"30s"`
+		PushThrottle time.Duration `envconfig:"SEARCH_PUSH_THROTTLE" default:"500ms"`
+		PushDebounce time.Duration `envconfig:"SEARCH_PUSH_DEBOUNCE" default:"500ms"`
 	}
 
 	// LogFormat [ json (default) | cli ]

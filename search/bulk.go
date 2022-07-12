@@ -46,6 +46,8 @@ type BulkElasticOpts struct {
 	// Minimal time between requests.
 	// Default: 500ms
 	Throttle time.Duration
+	// Time after request, if
+	Debounce time.Duration
 	// Maximum bulk request
 	// Good one would be 4-8mb; limit ~100MBsize in megabytes
 	// Default: 4M
@@ -60,6 +62,9 @@ func NewElastic(opts BulkElasticOpts) (es *BulkElastic, err error) {
 	}
 	if opts.Throttle == 0 {
 		opts.Throttle = 500 * time.Millisecond
+	}
+	if opts.Debounce == 0 {
+		opts.Debounce = 100 * time.Millisecond
 	}
 	if opts.BulkSize == 0 {
 		opts.BulkSize = 4
@@ -82,12 +87,14 @@ func NewElastic(opts BulkElasticOpts) (es *BulkElastic, err error) {
 		idle:          opts.IdleInterval,
 		idleTimer:     time.NewTimer(opts.IdleInterval),
 		throttle:      opts.Throttle,
+		debounce:      opts.Debounce,
 		throttleTimer: time.NewTimer(opts.Throttle),
+		debounceTimer: time.NewTimer(opts.Debounce),
 		// lastReqAt     :time.Now().
 		cond: sync.NewCond(&sync.Mutex{}),
 	}
 
-	if es.client, err = NewClient(opts.Host, opts.Username, opts.Password); err != nil {
+	if es.client, err = NewClient(opts.Host, opts.Username, opts.Password, opts.Logger); err != nil {
 		return nil, err
 	}
 
@@ -101,20 +108,31 @@ type BulkElastic struct {
 	wg     sync.WaitGroup
 
 	// sync; state of buffer and timeouts
-	idle          time.Duration
-	idleTimer     *time.Timer
-	throttle      time.Duration
-	throttleTimer *time.Timer
-	lastReqAt     time.Time
-	cond          *sync.Cond
-	buf           *bytes.Buffer
-	full          bool
-	shutdown      bool
+	idle           time.Duration
+	idleTimer      *time.Timer
+	throttle       time.Duration
+	debounce       time.Duration
+	throttleTimer  *time.Timer
+	debounceTimer  *time.Timer
+	lastReqAt      time.Time
+	cond           *sync.Cond
+	buf            *bytes.Buffer
+	full           bool
+	debounceStatus debounceStatus
+	shutdown       bool
 
 	inqueue pglogrepl.LSN
 
 	logger *zap.Logger
 }
+
+type debounceStatus uint8
+
+const (
+	debounceSkip debounceStatus = iota
+	debounceRequest
+	debounceWait
+)
 
 func (e *BulkElastic) Start(wg *sync.WaitGroup, ctx context.Context) {
 
@@ -154,24 +172,65 @@ func (e *BulkElastic) Start(wg *sync.WaitGroup, ctx context.Context) {
 		defer wg.Done()
 		errCount := 0
 		// retry := false
-		for { // push loop
+
+		for {
+
 			e.cond.L.Lock()
-			for { // condition check loop
+			// condition check loop. Label is used for additional verbosity
+		ConditionCheck:
+			for { // "condition check" loop lock
+
+				// app is shutting down. Push existing buffer now.
 				if e.shutdown {
-					break
-				} else if e.full && e.lastReqAt.Add(e.throttle).Before(time.Now()) {
-					break
-				} else if e.buf.Len() > 0 && e.lastReqAt.Add(e.idle).Before(time.Now()) {
-					break
+					break ConditionCheck
 				}
-				e.cond.Wait()
+
+				// Request throttle. Wait and restart condition check.
+				if !e.lastReqAt.Add(e.throttle).Before(time.Now()) {
+					e.cond.Wait()
+					continue ConditionCheck
+				}
+
+				// push full document
+				if e.full {
+					break ConditionCheck
+				}
+
+				// wait for idle push timeout and restart condition check.
+				if !e.lastReqAt.Add(e.idle).Before(time.Now()) {
+					e.cond.Wait()
+					continue ConditionCheck
+				}
+
+				// timer is our, but nothing to push -> request debounce on next request
+				if e.buf.Len() == 0 {
+					e.debounceStatus = debounceRequest
+					e.cond.Wait()
+					continue ConditionCheck
+				}
+
+				// if debounce wait was requested, set timeout and wait
+				if e.debounceStatus == debounceRequest { // buf is not empty
+					e.debounceTimer.Reset(e.debounce)
+					e.debounceStatus = debounceWait
+					e.cond.Wait()
+					continue ConditionCheck
+				}
+				if e.debounceStatus == debounceWait {
+					e.cond.Wait()
+					continue ConditionCheck
+				}
+
+				// push partial bulk request
+				break ConditionCheck
 			}
 			// action
 			for err := e.exec(); err != nil; errCount++ {
+				e.logger.Warn("retrying", zap.Int("attempt", errCount+1), zap.Error(err))
 				// TODO: allow adding documents to buffer between retries.
 				time.Sleep(e.throttle)
 				if errCount >= 2 { // after 3 errors
-					e.logger.Fatal("repeating errors", zap.Error(err)) // TODO: rewrite fatal to shutdown gracefully
+					e.logger.Fatal("repeating errors", zap.Int("attempt", errCount+1), zap.Error(err))
 				}
 			}
 
@@ -179,6 +238,7 @@ func (e *BulkElastic) Start(wg *sync.WaitGroup, ctx context.Context) {
 			e.throttleTimer.Reset(e.throttle)
 			e.idleTimer.Reset(e.idle)
 			e.full = false
+			e.debounceStatus = debounceSkip
 
 			if e.shutdown {
 				e.cond.L.Unlock()
@@ -194,6 +254,9 @@ func (e *BulkElastic) Start(wg *sync.WaitGroup, ctx context.Context) {
 		for {
 			select {
 			case <-e.idleTimer.C: // allows partial request
+				e.cond.Broadcast()
+			case <-e.debounceTimer.C: // trigger bulk, after short wait
+				e.debounceStatus = debounceSkip
 				e.cond.Broadcast()
 			case <-e.throttleTimer.C: // allows full buffer request
 				e.cond.Broadcast()
@@ -271,7 +334,6 @@ func (e *BulkElastic) exec() error {
 	body := bytes.NewReader(e.buf.Bytes())
 
 	if err := e.client.Bulk(body); err != nil {
-		// e.logger.Fatal("Failed ES Request", zap.Any("body", json.RawMessage(e.buf.Bytes())))
 		return errors.Wrap(err, "commit bulk request")
 	}
 
@@ -283,16 +345,3 @@ func (e *BulkElastic) exec() error {
 	e.logger.Info("pushed bulk request", zap.Int("size", size), zap.String("LSN", e.inqueue.String()))
 	return nil
 }
-
-// TODO: ignore deletes of non-existing documents
-// type RespItemErr struct {
-// Type      string `json:"type"`
-// Reason    string `json:"reason"`
-// IndexUUID string `json:"index_uuid"` // how to decode "aAsFqTI0Tc2W0LCWgPNrOA"?
-// Shard     string `json:"shard"`      //  int as a string
-// Index     string `json:"index"`
-// }
-//
-// func (e RespItemErr) Error() string {
-// return "[" + e.Index + "]" + e.Reason
-// }

@@ -185,6 +185,7 @@ func (t *Table) init() {
 		t.logger.Fatal("Unknown PK")
 	}
 
+	// TODO: Index name
 	t.indexName = t.schema.database.name
 	if t.schema.name != "public" {
 		t.indexName = t.schema.database.name + "_" + t.schema.name
