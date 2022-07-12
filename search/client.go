@@ -75,7 +75,6 @@ func (c *Client) Bulk(body io.Reader) error {
 	addr := c.Host.ResolveReference(&url.URL{
 		Path:     "/_bulk",
 		RawQuery: "filter_path=items.*.error,errors",
-		// RawQuery: "filter_path=errors", // ?filter_path=items.*.error,errors
 	})
 
 	body = io.MultiReader(body, bytes.NewReader([]byte{'\n'})) // Additional "termination" newline means end of a batch
@@ -93,8 +92,7 @@ func (c *Client) Bulk(body io.Reader) error {
 
 	if resp.StatusCode >= 300 {
 		if resp.StatusCode == http.StatusTooManyRequests {
-			// defer time.Sleep(5 * time.Second)
-			// TODO: blocking throtling
+			// return SLOW_DOWN error, so caller can adjust throtling
 			c.throttle = true
 		}
 		respBody, _ := ioutil.ReadAll(resp.Body)
