@@ -99,29 +99,37 @@ func (c *Client) Bulk(body io.Reader) error {
 		}
 		respBody, _ := ioutil.ReadAll(resp.Body)
 		defer resp.Body.Close()
-		log.Printf("%s", respBody)
+		log.Printf("%s", respBody) // TODO: logger
 
 		return ErrHTTP{StatusCode: resp.StatusCode}
 	}
 
-	// Response is filtered out by `filter_path` query parameter.Here we do not care about per-item results. Even in case of a single error, we loose consistency, so best case would be to fail and retry request, or restart script
-	respVal := struct {
-		Errors bool `json:"errors"`
-		Items  json.RawMessage
-		// Items - ignored; pottentialy can be used for stats and debug logging.
-	}{}
-
+	// Response is filtered out by `filter_path` query parameter
+	respVal := BulkResponseErrors{}
 	dec := json.NewDecoder(resp.Body)
 	defer resp.Body.Close()
 	if err := dec.Decode(&respVal); err != nil {
 		return err
 	}
 
-	if respVal.Errors {
-		c.logger.Warn("reponse errors", zap.Any("data", respVal.Items))
-		return errors.New("commit bulk returned errors")
+	fail := false
+	for _, err := range respVal.Errors {
+		c.logger.Warn("push error", zap.String("_id", err.DocID), zap.String("type", err.Type), zap.String("reason", err.Reason))
+		// TODO (#18): Make response error mapper:
+		// - illegal_argument_exception wrong index mapping
+		// - document_missing_exception ignore?
+		// - cluster_block_exception - fatal, restart won't help
+		// E.G:
+		// Ignore update of previosly deleted document
+		if err.Type == "document_missing_exception" {
+			continue
+		}
+		fail = true
 	}
 
+	if fail {
+		return errors.New("commit bulk returned errors")
+	}
 	return nil
 }
 
