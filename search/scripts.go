@@ -2,8 +2,7 @@ package search
 
 import (
 	_ "embed"
-
-	"github.com/pkg/errors"
+	"fmt"
 )
 
 var (
@@ -19,10 +18,10 @@ var (
 
 func (e *BulkElastic) PrepareScripts() error {
 	if err := e.client.Script("inline_add", inlineAddScript); err != nil {
-		return errors.Wrap(err, "prepare inline_add")
+		return fmt.Errorf("prepare inline_add: %w", err)
 	}
 	if err := e.client.Script("inline_del", inlineDelScript); err != nil {
-		return errors.Wrap(err, "prepare inline_del")
+		return fmt.Errorf("prepare inline_del: %w", err)
 	}
 
 	// Lucene does not support map fields. And there is no way to flaten them.

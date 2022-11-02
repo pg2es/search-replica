@@ -2,13 +2,13 @@ package postgres
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"sync"
 
 	"github.com/jackc/pgconn"
 	"github.com/jackc/pglogrepl"
 	"github.com/pg2es/search-replica/postgres/pgcopy"
-	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
@@ -29,14 +29,11 @@ func init() {
 func (t *Table) CopyAll(ctx context.Context, conn *pgconn.PgConn) error {
 	t.init()
 
-	// TODO: configurable
-	// ctx, cancel := context.WithTimeout(ctx, 1000*time.Second)
-	// defer cancel()
+	// XXX: ctx.WithDeadline here can lead to deadlock.
 
 	q := t.copyQuery()
 	t.logger.Info("COPYing snapshot", zap.String("sql", q))
 
-	// buf := &bytes.Buffer{}
 	pipeReader, pipeWriter := io.Pipe()
 	wg := &sync.WaitGroup{}
 
@@ -71,13 +68,13 @@ func (t *Table) CopyAll(ctx context.Context, conn *pgconn.PgConn) error {
 			return nil
 		}
 		if err != nil {
-			return errors.Wrap(err, "copy from")
+			return fmt.Errorf("copy from: %w", err)
 		}
 		tableRows.Inc()
 
 		err = t.decodeRow(row, pglogrepl.TupleDataTypeBinary)
 		if err != nil {
-			return errors.Wrap(err, "decode copy from")
+			return fmt.Errorf("decode copy from: %w", err)
 		}
 
 		if t.index {

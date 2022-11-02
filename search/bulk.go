@@ -4,14 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/jackc/pglogrepl"
 	"github.com/pg2es/search-replica/postgres"
-	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
+)
+
+var (
+	ErrEmptyDocumentStream = errors.New("document stream can not be empty")
 )
 
 var (
@@ -74,7 +79,7 @@ func NewElastic(opts BulkElasticOpts) (es *BulkElastic, err error) {
 	}
 
 	if opts.Stream == nil {
-		return nil, errors.New("document stream can not be empty")
+		return nil, ErrEmptyDocumentStream
 	}
 
 	// allocate buffer of bulk size
@@ -334,7 +339,7 @@ func (e *BulkElastic) exec() error {
 	body := bytes.NewReader(e.buf.Bytes())
 
 	if err := e.client.Bulk(body); err != nil {
-		return errors.Wrap(err, "commit bulk request")
+		return fmt.Errorf("commit bulk request: %w", err)
 	}
 
 	if e.inqueue != pglogrepl.LSN(0) { // do not commit zero positions during reindexing

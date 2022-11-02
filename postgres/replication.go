@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -12,7 +13,6 @@ import (
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgproto3/v2"
 	"github.com/jackc/pgtype"
-	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
@@ -33,7 +33,7 @@ func init() {
 func pgconnConfig() (*pgconn.Config, error) {
 	config, err := pgconn.ParseConfig("") // falback to parsing env variables
 	if err != nil {
-		return nil, errors.Wrap(err, "can not parse postgress config")
+		return nil, fmt.Errorf("can not parse Postgres config: %w", err)
 	}
 	if config.Database == "" {
 		return nil, errors.New("database needs to be specified")
@@ -55,14 +55,14 @@ func (db *Database) Connect(ctx context.Context) error {
 	// In replication mode, only the simple query protocol can be used, which is not sufficient in this case.
 	delete(config.RuntimeParams, "replication")
 	if db.queryConn, err = pgconn.ConnectConfig(ctx, config); err != nil {
-		return errors.Wrap(err, "can not connect")
+		return fmt.Errorf("can not connect: %w", err)
 	}
 
 	// See: https://www.postgresql.org/docs/14/libpq-connect.html#LIBPQ-CONNECT-REPLICATION
 	// Following parameter switch connection into logical replication mode.
 	config.RuntimeParams["replication"] = "database"
 	if db.replConn, err = pgconn.ConnectConfig(ctx, config); err != nil {
-		return errors.Wrap(err, "can not connect")
+		return fmt.Errorf("can not connect: %w", err)
 	}
 
 	db.version = db.replConn.ParameterStatus("server_version")
@@ -76,15 +76,6 @@ func (db *Database) Connect(ctx context.Context) error {
 
 	db.logger.Info("Connected to Database", zap.String("postgres_version", db.version), zap.Bool("binary_streaming", db.useBinary))
 	return nil
-}
-
-// newConn for `select *` queries. ( for -reindex ). Do not forget to close it.
-func (db *Database) newConn(ctx context.Context) (conn *pgconn.PgConn, err error) {
-	config, _ := pgconnConfig()
-	delete(config.RuntimeParams, "replication")
-	conn, err = pgconn.ConnectConfig(ctx, config)
-
-	return conn, errors.Wrap(err, "can not connect")
 }
 
 func (db *Database) Close(ctx context.Context) error {
@@ -114,7 +105,6 @@ func (db *Database) CreateReplicationSlot(ctx context.Context) {
 		return
 	}
 	db.logger.Info("created replication slot", zap.String("slot", db.SlotName))
-	return
 }
 
 func (db *Database) Tx(ctx context.Context) error {
@@ -150,7 +140,7 @@ func (db *Database) StartReplication(ctx context.Context, at pglogrepl.LSN) erro
 
 	opts := pglogrepl.StartReplicationOptions{PluginArgs: pluginArguments}
 	if err := pglogrepl.StartReplication(ctx, db.replConn, db.SlotName, at, opts); err != nil {
-		errors.Wrap(err, "start replication")
+		return fmt.Errorf("start replication: %w", err)
 	}
 
 	standbyDeadline := time.Now().Add(db.StandbyTimeout)
@@ -164,11 +154,11 @@ func (db *Database) StartReplication(ctx context.Context, at pglogrepl.LSN) erro
 			status := pglogrepl.StandbyStatusUpdate{WALWritePosition: commit}
 			err := pglogrepl.SendStandbyStatusUpdate(ctx, db.replConn, status)
 			if err != nil { // TODO: add few retries
-				return errors.Wrap(err, "send standby status update")
+				return fmt.Errorf("send standby status update: %w", err)
 			}
 			if commit > prevCommit {
 				prevCommit = commit
-				db.logger.Debug("Commited LSN", zap.Stringer("lsn", commit))
+				db.logger.Debug("Committed LSN", zap.Stringer("lsn", commit))
 			}
 			standbyDeadline = time.Now().Add(db.StandbyTimeout)
 		}
@@ -262,7 +252,7 @@ func (db *Database) HandleLogical(ctx context.Context, lsn pglogrepl.LSN, msg pg
 
 			dataType, err := db.dataTypeDecoder(relcol.DataType)
 			if err != nil {
-				return errors.Wrapf(err, "setup column type %s.%s", col.table.name, col.name)
+				return fmt.Errorf("setup column type %s.%s: %w", col.table.name, col.name, err)
 			}
 			col.setTyp(dataType)
 		}
@@ -288,9 +278,8 @@ func (db *Database) HandleLogical(ctx context.Context, lsn pglogrepl.LSN, msg pg
 	case *pglogrepl.UpdateMessage:
 		table := db.relation(v.RelationID)
 		metricMessages.WithLabelValues("update", table.name).Inc()
-		// TODO: If PK or Routing field was changed, procceed with delete & insert pair. Also checking for table.insertOnly.
-		// if !table.insertOnly && () {
-		// oldRow := rowFromPGTuple(v.OldTuple)
+		// TODO: If PK or Routing field was changed, proceed with delete & insert pair, including inlines
+		// recreate := !table.upsertOnly && v.OldTuple != nil && table.tupleKeysChanged(v.OldTuple, v.NewTuple)
 
 		action := ESUpdate
 		if table.index && !table.upsertOnly && v.OldTuple != nil && table.tupleKeysChanged(v.OldTuple, v.NewTuple) {
@@ -333,23 +322,21 @@ func (db *Database) HandleLogical(ctx context.Context, lsn pglogrepl.LSN, msg pg
 			db.stream.add(Document{Position: pos, Meta: meta, Data: data})
 		}
 
-	case *pglogrepl.TruncateMessage:
-		// TODO: Delete and recreate index, while preserving mapping.
-		db.logger.Info(
-			"not implemented message %s",
-			zap.Stringer("type_name", msg.Type()),
-			zap.Uint8("type_code", uint8(msg.Type())),
-		)
-
 	case *pglogrepl.OriginMessage:
 		// skip. Useless for our case
 
 	// Received to inform us about UserDefined types
 	case *pglogrepl.TypeMessage:
-		log.Printf("Type Message %s.%s OID: %d", v.Namespace, v.Name, v.DataType)
 		db.discoverUnknownType(ctx, pgtype.OID(v.DataType))
+
+	// case *pglogrepl.TruncateMessage:
+	// should be logged as non-implemented type in `default` closure.
 	default:
-		log.Printf("unknown message %s", msg.Type())
+		db.logger.Warn(
+			"message type is not implemented",
+			zap.Stringer("type_name", msg.Type()),
+			zap.Uint8("type_code", uint8(msg.Type())),
+		)
 		return fmt.Errorf("unknown logical message type %s", msg.Type())
 	}
 	return nil

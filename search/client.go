@@ -3,16 +3,19 @@ package search
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
-	"io/ioutil"
-	"log"
 	"net/http"
 	"net/url"
 	"path"
 	"strings"
 
-	"github.com/pkg/errors"
 	"go.uber.org/zap"
+)
+
+var (
+	ErrBulkCommitFail = errors.New("commit bulk returned errors")
 )
 
 type Credentials struct {
@@ -81,13 +84,13 @@ func (c *Client) Bulk(body io.Reader) error {
 
 	req, err := http.NewRequest("POST", addr.String(), body)
 	if err != nil {
-		return errors.Wrap(err, "prepare bulk request")
+		return fmt.Errorf("prepare bulk request: %w", err)
 	}
 	req.Header.Add("Content-Type", "application/x-ndjson")
 
 	resp, err := c.Do(req)
 	if err != nil {
-		return errors.Wrap(err, "bulk request")
+		return fmt.Errorf("execute bulk request: %w", err)
 	}
 
 	if resp.StatusCode >= 300 {
@@ -95,9 +98,13 @@ func (c *Client) Bulk(body io.Reader) error {
 			// return SLOW_DOWN error, so caller can adjust throtling
 			c.throttle = true
 		}
-		respBody, _ := ioutil.ReadAll(resp.Body)
-		defer resp.Body.Close()
-		log.Printf("%s", respBody) // TODO: logger
+
+		if ce := c.logger.Check(zap.DebugLevel, "error response"); ce != nil {
+			respBody, _ := io.ReadAll(resp.Body)
+			defer resp.Body.Close()
+			// TODO: wrap body with json.RawMessage if response Content-Type is "application/json"
+			ce.Write(zap.Any("body", respBody), zap.Int("status_code", resp.StatusCode))
+		}
 
 		return ErrHTTP{StatusCode: resp.StatusCode}
 	}
@@ -110,7 +117,7 @@ func (c *Client) Bulk(body io.Reader) error {
 		return err
 	}
 
-	fail := false
+	var returnErr error
 	for _, err := range respVal.Errors {
 		c.logger.Warn("push error", zap.String("_id", err.DocID), zap.String("type", err.Type), zap.String("reason", err.Reason))
 		// TODO (#18): Make response error mapper:
@@ -118,17 +125,14 @@ func (c *Client) Bulk(body io.Reader) error {
 		// - document_missing_exception ignore?
 		// - cluster_block_exception - fatal, restart won't help
 		// E.G:
-		// Ignore update of previosly deleted document
+		// Ignore update of previously deleted document
 		if err.Type == "document_missing_exception" {
 			continue
 		}
-		fail = true
+		returnErr = ErrBulkCommitFail
 	}
 
-	if fail {
-		return errors.New("commit bulk returned errors")
-	}
-	return nil
+	return returnErr
 }
 
 func (c *Client) Script(id, source string) error {
@@ -139,19 +143,19 @@ func (c *Client) Script(id, source string) error {
 	body := &bytes.Buffer{}
 	body.WriteString(`{"script": {"lang": "painless", "source": `)
 	if err := json.NewEncoder(body).Encode(source); err != nil {
-		return errors.Wrap(err, "can not encode script request")
+		return fmt.Errorf("can not encode script request: %w", err)
 	}
 	body.WriteString(`}}`)
 
 	req, err := http.NewRequest("PUT", addr.String(), body)
 	if err != nil {
-		return errors.Wrap(err, "prepare bulk request")
+		return fmt.Errorf("prepare bulk request: %w", err)
 	}
 	req.Header.Add("Content-Type", "application/json")
 
 	resp, err := c.Do(req)
 	if err != nil {
-		return errors.Wrap(err, "script compilation request")
+		return fmt.Errorf("script compilation request: %w", err)
 	}
 
 	// todo c.checkThrottle(resp), to encapsulate http.StatusTooManyRequests checks
