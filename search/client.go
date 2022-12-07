@@ -102,8 +102,11 @@ func (c *Client) Bulk(body io.Reader) error {
 		if ce := c.logger.Check(zap.DebugLevel, "error response"); ce != nil {
 			respBody, _ := io.ReadAll(resp.Body)
 			defer resp.Body.Close()
-			// TODO: wrap body with json.RawMessage if response Content-Type is "application/json"
-			ce.Write(zap.Any("body", respBody), zap.Int("status_code", resp.StatusCode))
+
+			if strings.Contains(resp.Header.Get("Content-Type"), "application/json") {
+				ce.Write(zap.Any("body_json", json.RawMessage(respBody)), zap.Int("status_code", resp.StatusCode))
+			}
+			ce.Write(zap.ByteString("body", respBody), zap.Int("status_code", resp.StatusCode))
 		}
 
 		return ErrHTTP{StatusCode: resp.StatusCode}

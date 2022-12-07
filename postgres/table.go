@@ -64,15 +64,24 @@ const (
 
 // tupleKeysChanged tells whether document needs to be recreated
 func (t *Table) tupleKeysChanged(oldTuple, newTuple *pglogrepl.TupleData) bool {
+	if oldTuple == nil {
+		return false
+	}
+
 	if !bytes.Equal(
 		oldTuple.Columns[t.pkCol.pos].Data,
 		newTuple.Columns[t.pkCol.pos].Data,
 	) {
 		return true
 	}
-	if t.routingCol != nil && !bytes.Equal(newTuple.Columns[t.routingCol.pos].Data, oldTuple.Columns[t.routingCol.pos].Data) {
+
+	if t.routingCol != nil && !bytes.Equal(
+		newTuple.Columns[t.routingCol.pos].Data,
+		oldTuple.Columns[t.routingCol.pos].Data,
+	) {
 		return true
 	}
+
 	return false
 }
 

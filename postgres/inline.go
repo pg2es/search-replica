@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 
+	"github.com/jackc/pglogrepl"
 	jwriter "github.com/mailru/easyjson/jwriter"
 	"go.uber.org/zap"
 )
@@ -33,7 +34,7 @@ type Inline struct {
 
 // returns inline PK column, which is PK of source table by default
 func (i *Inline) pk() *Column {
-	if i.pkCol == nil {
+	if i.pkCol == nil { // TODO: strict check for non-nil value
 		i.pkCol = i.source.pkCol
 	}
 	return i.pkCol
@@ -60,14 +61,33 @@ func (i *Inline) init() {
 	}
 }
 
-// keysChanged tells whether document needs to be recreated
-func (i *Inline) keysChanged(oldRow, newRow [][]byte) bool {
-	if !bytes.Equal(newRow[i.parentCol.pos], oldRow[i.parentCol.pos]) {
+// keysChanged tells whether inline needs to be recreated or updated
+func (i *Inline) tupleKeysChanged(oldTuple, newTuple *pglogrepl.TupleData) bool {
+	if oldTuple == nil {
+		return false
+	}
+
+	if !bytes.Equal(
+		oldTuple.Columns[i.parentCol.pos].Data,
+		newTuple.Columns[i.parentCol.pos].Data,
+	) {
 		return true
 	}
-	if i.routingCol != nil && !bytes.Equal(newRow[i.routingCol.pos], oldRow[i.routingCol.pos]) {
+
+	if !bytes.Equal(
+		oldTuple.Columns[i.pkCol.pos].Data,
+		newTuple.Columns[i.pkCol.pos].Data,
+	) {
 		return true
 	}
+
+	if i.routingCol != nil && !bytes.Equal(
+		oldTuple.Columns[i.routingCol.pos].Data,
+		newTuple.Columns[i.routingCol.pos].Data,
+	) {
+		return true
+	}
+
 	return false
 }
 
