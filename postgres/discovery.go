@@ -2,12 +2,11 @@ package postgres
 
 import (
 	"context"
+	_ "embed"
+	"errors"
 	"fmt"
 
-	_ "embed"
-
 	"github.com/jackc/pgtype"
-	"github.com/pkg/errors"
 	"go.uber.org/zap"
 )
 
@@ -16,16 +15,22 @@ const ( // shortcuts
 	textT = pgtype.TextFormatCode
 )
 
+var (
+	// ErrUnknownType type discovery failed
+	ErrUnknownType = errors.New("unknown type")
+)
+
 // TODO: check `wal_status` from `pg_replication_slots`. See: https://www.postgresql.org/docs/13/view-pg-replication-slots.html
 // And if status is `lost`, start reindexing from scratch.
 
 // discoverQuery selects all table and column comments for tables mentioned in publication.
 // comments are used as golang structtags for configuration.
 // TODO (vitalii): check if FK -> tablename can help with inlines
+//
 //go:embed queries/discover_query.sql
 var discoverQuery string
 
-// Discover uses postgress publication and table or column comments to generate replication config
+// Discover uses Postgres publication and table or column comments to generate replication config
 // Only tables explosed via Publication will be considered for exporting to ES.
 func (db *Database) Discover(ctx context.Context) error {
 	db.queryConnMu.Lock()
@@ -37,7 +42,7 @@ func (db *Database) Discover(ctx context.Context) error {
 	db.queryConnMu.Unlock()
 
 	if res.Err != nil {
-		return errors.Wrap(res.Err, "discover db tags config")
+		return fmt.Errorf("discover db tags config: %w", res.Err)
 	}
 
 	cd := struct {
@@ -78,7 +83,8 @@ func (db *Database) Discover(ctx context.Context) error {
 	return nil
 }
 
-// discoverENUMQuery can be used to retreive enum members, which is not required. Bug gives slightly increased performance.
+// discoverENUMQuery can be used to retrieve enum members, which is not required. But gives slightly increased performance.
+//
 //go:embed queries/discover_enum_query.sql
 var discoverENUMQuery string
 
@@ -91,7 +97,7 @@ func (db *Database) discoverUnknownType(ctx context.Context, oid pgtype.OID) err
 
 	typInfo, err := db.getTypInfo(ctx, oid)
 	if err != nil {
-		return errors.Wrap(err, "get type info")
+		return fmt.Errorf("get type info", err)
 	}
 
 	switch typInfo.Typ.Int {
@@ -100,7 +106,7 @@ func (db *Database) discoverUnknownType(ctx context.Context, oid pgtype.OID) err
 		// https://github.com/psycopg/psycopg2/blob/1d3a89a0bba621dc1cc9b32db6d241bd2da85ad1/lib/extras.py#L1089-L1097
 		attrelid, err := typInfo.TypRelOID.EncodeBinary(db.connInfo, nil)
 		if err != nil {
-			return errors.Wrap(err, "can not encode OID parameter")
+			return fmt.Errorf("can not encode OID parameter: %w", err)
 		}
 
 		db.queryConnMu.Lock()
@@ -162,7 +168,7 @@ func (db *Database) discoverUnknownType(ctx context.Context, oid pgtype.OID) err
 	case 'b':
 		break
 	default:
-		return errors.New("unknown type")
+		return ErrUnknownType
 	}
 
 	switch typInfo.Cat.Int {
@@ -201,7 +207,7 @@ var queryTypeByOID string
 func (db *Database) getTypInfo(ctx context.Context, oid pgtype.OID) (*typInfoRow, error) {
 	typOIDArg, err := oid.EncodeBinary(db.connInfo, nil)
 	if err != nil {
-		return nil, errors.Wrap(err, "can not encode OID parameter")
+		return nil, fmt.Errorf("can not encode OID parameter: %w", err)
 	}
 
 	db.queryConnMu.Lock()
@@ -215,7 +221,7 @@ func (db *Database) getTypInfo(ctx context.Context, oid pgtype.OID) (*typInfoRow
 	typInfo := typInfoRow{}
 
 	if res.Err != nil {
-		return nil, errors.Wrapf(res.Err, "type not found %v", oid)
+		return nil, fmt.Errorf("type not found %v: %w", oid, res.Err)
 	}
 	if len(res.Rows) != 1 {
 		return nil, fmt.Errorf("type request returned %v rows, 1 expected", len(res.Rows))
@@ -232,7 +238,7 @@ func (db *Database) getTypInfo(ctx context.Context, oid pgtype.OID) (*typInfoRow
 	errs[6] = typInfo.TypRelOID.DecodeBinary(nil, row[6])
 	for _, err := range errs {
 		if err != nil {
-			return nil, errors.Wrap(err, "decode type response error")
+			return nil, fmt.Errorf("decode type response error: %w", err)
 		}
 	}
 

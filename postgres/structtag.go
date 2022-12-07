@@ -1,8 +1,10 @@
 package postgres
 
 import (
+	"errors"
+	"fmt"
+
 	"github.com/pg2es/search-replica/conftags"
-	"github.com/pkg/errors"
 )
 
 func (t *Table) parseStructTag(tag string) error {
@@ -96,7 +98,7 @@ func (t *Table) parseIndexTag(tags conftags.Tags) error {
 func (c *Column) parseStructTag(tag string) error {
 	tags, err := conftags.Parse(tag)
 	if err != nil {
-		return errors.Wrapf(err, "parse column %s struct tag", c.name)
+		return fmt.Errorf("parse column %s struct tag: %w", c.name, err)
 	}
 
 	c.parseIndexTag(tags)

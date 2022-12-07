@@ -2,15 +2,22 @@ package postgres
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"sync"
 	"time"
 
 	"github.com/jackc/pgconn"
-	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgtype"
-	"github.com/pkg/errors"
 	"go.uber.org/zap"
+)
+
+var (
+	// ErrZeroType Postgres type OID can not be zero
+	ErrZeroType = errors.New("postgres type OID can't be zero")
+	// ErrTypeNotFound can not find type OID among discovered types
+	ErrTypeNotFound = errors.New("can not find discovered type")
 )
 
 func New(stream *StreamPipe, logger *zap.Logger) *Database {
@@ -39,7 +46,6 @@ type Database struct {
 	useBinary      bool
 	Publication    string
 	StandbyTimeout time.Duration
-	committedLSN   pglogrepl.LSN
 
 	stream *StreamPipe
 	logger *zap.Logger
@@ -86,15 +92,15 @@ func (db *Database) indexableTables() (tables []*Table) {
 // For changes in decoding or json marhasling, check pgtype package itself.
 func (db *Database) dataTypeDecoder(oid uint32) (*pgtype.DataType, error) {
 	if oid == 0 {
-		return nil, errors.New("Invalid ZERO type")
+		return nil, ErrZeroType
 	}
 	if err := db.discoverUnknownType(context.Background(), pgtype.OID(oid)); err != nil {
-		return nil, errors.Wrap(err, "can not discover type")
+		return nil, fmt.Errorf("can not discover type: %w", err)
 	}
 
 	typ, ok := db.connInfo.DataTypeForOID(oid)
 	if !ok {
-		return nil, errors.New("can not find discovered type")
+		return nil, ErrTypeNotFound
 	}
 
 	return typ, nil
@@ -133,7 +139,7 @@ func (db *Database) schema(name string) (sc *Schema) {
 	return db.schemas[name]
 }
 
-// Schema describes Postgress schema/namespace
+// Schema describes Postgres schema/namespace
 type Schema struct {
 	name string
 	// Add ES index col
@@ -143,7 +149,7 @@ type Schema struct {
 	inlines map[string]*Inline // All inlines by name
 
 	// custom enum types by name.
-	// same types an be accesed on DB level by OID
+	// same types an be accessed on DB level by OID
 	enumTypes map[string]*pgtype.EnumType
 }
 

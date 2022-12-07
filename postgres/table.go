@@ -3,16 +3,21 @@ package postgres
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"strings"
 
 	"github.com/jackc/pglogrepl"
 	jwriter "github.com/mailru/easyjson/jwriter"
-	"github.com/pkg/errors"
 	"go.uber.org/zap"
 )
 
+var (
+	// ErrColumnOutOfRange means that received result tuple is smaller than expected column position
+	ErrColumnOutOfRange = errors.New("column out of range")
+)
+
 type Table struct {
-	schema  *Schema            // RO
+	schema  *Schema
 	columns map[string]*Column // all columns by name
 
 	inlines     []*Inline // inline name -> table which uses it. owns
@@ -57,17 +62,6 @@ const (
 	ESIndex  ESAction = "index" // Upsert
 )
 
-// keysChanged tells whether document needs to be recreated
-func (t *Table) keysChanged(oldRow, newRow [][]byte) bool {
-	if !bytes.Equal(newRow[t.pkCol.pos], oldRow[t.pkCol.pos]) {
-		return true
-	}
-	if t.routingCol != nil && !bytes.Equal(newRow[t.routingCol.pos], oldRow[t.routingCol.pos]) {
-		return true
-	}
-	return false
-}
-
 // tupleKeysChanged tells whether document needs to be recreated
 func (t *Table) tupleKeysChanged(oldTuple, newTuple *pglogrepl.TupleData) bool {
 	if !bytes.Equal(
@@ -100,7 +94,7 @@ func (t *Table) decodeTuple(tuple *pglogrepl.TupleData) error {
 	var empty bool
 	for _, col := range t.indexColumns() {
 		if col.pos >= len(tuple.Columns) {
-			return errors.New("column out of range")
+			return ErrColumnOutOfRange
 		}
 		if err := col.decode(tuple.Columns[col.pos].Data, tuple.Columns[col.pos].DataType); err != nil {
 			return err
@@ -249,7 +243,7 @@ func (t *Table) copyQuery() string {
 		if i != 0 {
 			q.WriteByte(',')
 		}
-		col.pos = i // Update positions, relative to SELECT result. Position will be overwriten after replication starts
+		col.pos = i // Update positions, relative to COPY result. Position will be overwritten after replication starts
 
 		q.WriteByte('"')
 		q.WriteString(strings.ReplaceAll(col.name, `"`, `""`))

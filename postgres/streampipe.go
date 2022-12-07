@@ -2,10 +2,10 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 
 	"github.com/jackc/pglogrepl"
-	"github.com/pkg/errors"
 )
 
 var (

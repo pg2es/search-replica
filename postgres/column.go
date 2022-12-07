@@ -7,18 +7,16 @@ import (
 
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgtype"
-	"github.com/pkg/errors"
 	"go.uber.org/zap"
 )
 
 type Column struct {
-	table *Table // RO
+	table *Table
 
 	name      string // sql column name
 	fieldName string // field name of json document. If empty, column name will be used
 	sqlPK     bool   // in case if no config was provided, fallback to Postgres table primary key will be used
 	index     bool   // specifies whether column should be indexed or ignored
-	routing   bool   // is ES `_routing`
 	oldInWAL  bool   // old value is stored in WAL for delete/update operations. See: https://www.postgresql.org/docs/10/sql-altertable.html#SQL-CREATETABLE-REPLICA-IDENTITY
 
 	// Postgres
@@ -29,12 +27,6 @@ type Column struct {
 	valueOmit bool         // TODO: merge with value
 
 	logger *zap.Logger
-}
-
-func (c *Column) copy() *Column {
-	newCol := *c
-	newCol.value = pgtype.NewValue(c.value).(DecoderValue)
-	return &newCol
 }
 
 func (col *Column) decode(data []byte, dataType uint8) (err error) {
@@ -52,7 +44,7 @@ func (col *Column) decode(data []byte, dataType uint8) (err error) {
 	}
 	if err != nil {
 		col.logger.Warn("failed to decode column value", zap.Error(err))
-		return errors.Wrapf(err, "decode column (%s) value", col.name)
+		return fmt.Errorf("decode column (%s) value: %w", col.name, err)
 	}
 
 	return nil
@@ -63,21 +55,24 @@ func (col *Column) Omit() bool {
 }
 
 func (col *Column) MarshalJSON() ([]byte, error) {
-	// reuse predefined MarshalJSON methods on postgress types, to preserve null values, skip zeroing, and possible speedup
+	// reuse predefined MarshalJSON methods on Postgres types, to preserve null values, skip zeroing, and possible speedup
 	if marshaller, ok := col.value.(json.Marshaler); ok {
 		val, err := marshaller.MarshalJSON()
 		if err != nil {
-			col.logger.Warn("Marshal with MarshalJSON", zap.Error(err))
+			return val, fmt.Errorf("marshal column (%s) value via MarshalJSON: %w", col.name, err)
 		}
-		return val, errors.Wrapf(err, "Marshal column (%s) value via MarshalJSON", col.name)
+		return val, nil
 	}
 
 	val, err := json.Marshal(col.value.Get())
-	return val, errors.Wrapf(err, "Marshal column (%s) value via json.Marshal", col.name)
+	if err != nil {
+		return val, fmt.Errorf("marshal column (%s) value via json.Marshal: %w", col.name, err)
+	}
+	return val, nil
 }
 
 func (c *Column) jsonKey() string {
-	// TODO: fix for omited values?
+	// TODO: fix for omitted values?
 	return c.fieldName
 }
 

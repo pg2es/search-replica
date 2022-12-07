@@ -1,13 +1,13 @@
 // package main ...
-//   _______  _______    _       _______  _______
-//  (  ____ )(  ____ \  ( \     (  ____ \(  ____ \
-//  | (    )|| (    \/   \ \    | (    \/| (    \/
-//  | (____)|| |          \ \   | (__    | (_____
-//  |  _____)| | ____      ) )  |  __)   (_____  )
-//  | (      | | \_  )    / /   | (            ) |
-//  | )      | (___) |   / /    | (____/\/\____) |
-//  |/       (_______)  (_/     (_______/\_______)
 //
+//	 _______  _______    _       _______  _______
+//	(  ____ )(  ____ \  ( \     (  ____ \(  ____ \
+//	| (    )|| (    \/   \ \    | (    \/| (    \/
+//	| (____)|| |          \ \   | (__    | (_____
+//	|  _____)| | ____      ) )  |  __)   (_____  )
+//	| (      | | \_  )    / /   | (            ) |
+//	| )      | (___) |   / /    | (____/\/\____) |
+//	|/       (_______)  (_/     (_______/\_______)
 package main
 
 import (
@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/jackc/pglogrepl"
-	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -59,7 +58,7 @@ func main() {
 
 	ctx, rootCancel := context.WithCancel(context.Background())
 	wg := &sync.WaitGroup{}
-	// TODO: waitgroups and gracefull shutdown
+	// TODO: waitgroups and graceful shutdown
 
 	stream := postgres.NewStreamPipe(ctx)
 
@@ -86,13 +85,13 @@ func main() {
 	db := postgres.New(stream, logger)
 	db.SlotName = cfg.Postgres.Slot
 	db.Publication = cfg.Postgres.Publication
-	if err := db.Connect(ctx); err != nil { // This will implicitly use PG* env variables
-		logger.Fatal(errors.Wrap(err, "connect to DB").Error())
+	if err := db.Connect(ctx); err != nil { // implicitly uses PG* env variables
+		logger.Fatal("connect to DB", zap.Error(err))
 	}
 	defer db.Close(ctx)
 
 	if err := db.Discover(ctx); err != nil {
-		logger.Fatal(errors.Wrap(err, "discover config").Error())
+		logger.Fatal("discover config", zap.Error(err))
 	}
 
 	db.RegisterSlotLagMetric(ctx)
@@ -104,10 +103,8 @@ func main() {
 		http.Error(w, "not implemented", http.StatusNotImplemented)
 	})
 	mux.Handle("/metrics", promhttp.Handler())
-	server := http.Server{
-		Addr:    cfg.Address,
-		Handler: mux,
-	}
+
+	server := http.Server{Addr: cfg.Address, Handler: mux}
 
 	//
 	// API & Metrics
@@ -163,7 +160,7 @@ func main() {
 	go func() {
 		defer wg.Done()
 		<-startupDone // wait for subscription and initial reindexing
-		// Zero value means: Get last commited position for this slot from master
+		// Zero value means: Get last committed position for this slot from master
 		state.Store("streaming wal")
 		if err = db.StartReplication(ctx, pglogrepl.LSN(0)); err != nil {
 			logger.Fatal("replication error", zap.Error(err))

@@ -2,11 +2,11 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"time"
 
 	"github.com/kelseyhightower/envconfig"
-	"github.com/pkg/errors"
 )
 
 var (
@@ -24,7 +24,7 @@ func init() {
 // Config for the application.
 type Config struct {
 	Postgres struct {
-		// Postgres replication slot. Used to controll WAL positions.
+		// Postgres replication slot. Used to control WAL positions.
 		Slot string `envconfig:"PG_SLOT" default:"pg2es"`
 		// PostgresPublication containing databases and tables that should be replicated or indexed by the search engine.
 		Publication string `envconfig:"PG_PUBLICATION" default:"search"`
@@ -74,7 +74,7 @@ type Config struct {
 func FromEnv() *Config {
 	var cfg Config
 	if err := envconfig.Process("", &cfg); err != nil {
-		log.Fatal(errors.Wrap(err, "Can not read initial config"))
+		log.Fatal(fmt.Errorf("can not read initial config: %w", err))
 	}
 	return &cfg
 }

@@ -13,6 +13,7 @@ package demo_test
 import (
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -22,14 +23,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 )
-
-type ConsistencyTest struct {
-	client  *searchClient
-	csvData *csvData
-}
 
 func TestConsistency(t *testing.T) {
 	is := require.New(t)
@@ -48,13 +43,11 @@ func TestConsistency(t *testing.T) {
 	client := newClient("http://127.0.0.1:9200", "postgres", 1)
 	var err error
 	for err == nil {
-		main, childs, inlines, err := data.Next()
+		main, children, inlines, err := data.Next()
 		if err == io.EOF {
 			break
 		}
 		is.NoError(err)
-		_ = inlines
-		_ = childs
 
 		t.Run(main.id, func(t *testing.T) {
 			is := require.New(t)
@@ -77,7 +70,7 @@ func TestConsistency(t *testing.T) {
 			t.Run("join (children)", func(t *testing.T) {
 				is := require.New(t)
 				childdoc := &childDoc{}
-				for _, child := range childs {
+				for _, child := range children {
 					err := client.GetSource(child.id, child.parentID, childdoc)
 					is.NoError(err)
 					assertChild(is, child, childdoc)
@@ -136,13 +129,13 @@ func (data *csvData) Next() (*mainCSV, []*childCSV, []*inlineCSV, error) {
 		return nil, nil, nil, io.EOF
 	}
 	if err != nil {
-		return nil, nil, nil, errors.Wrap(err, "csv read")
+		return nil, nil, nil, fmt.Errorf("csv read: %w", err)
 	}
 
 	data.lastMain = newMainCSV(main)
 	var (
-		childs  []*childCSV
-		inlines []*inlineCSV
+		children []*childCSV
+		inlines  []*inlineCSV
 	)
 
 	for {
@@ -150,7 +143,7 @@ func (data *csvData) Next() (*mainCSV, []*childCSV, []*inlineCSV, error) {
 			if data.lastChild.parentID != data.lastMain.id {
 				break
 			}
-			childs = append(childs, data.lastChild)
+			children = append(children, data.lastChild)
 		}
 		child, err := data.child.Read()
 		if err != nil { // including EOF
@@ -173,7 +166,7 @@ func (data *csvData) Next() (*mainCSV, []*childCSV, []*inlineCSV, error) {
 		}
 		data.lastInline = newInlineCSV(inline)
 	}
-	return data.lastMain, childs, inlines, nil
+	return data.lastMain, children, inlines, nil
 }
 
 type searchClient struct {
@@ -200,7 +193,7 @@ func (c *searchClient) GetSource(id, routing string, v interface{}) error {
 
 	resp, err := http.Get(url)
 	if err != nil {
-		return errors.Wrap(err, "http get")
+		return fmt.Errorf("http get: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == 404 {
@@ -210,7 +203,7 @@ func (c *searchClient) GetSource(id, routing string, v interface{}) error {
 		return fmt.Errorf("%d %s: %s", resp.StatusCode, resp.Status, url)
 	}
 	if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
-		return errors.Wrap(err, "json decode")
+		return fmt.Errorf("json decode: %w", err)
 	}
 
 	return nil

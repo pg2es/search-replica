@@ -11,9 +11,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"io"
-
-	"github.com/pkg/errors"
 )
 
 var (
@@ -73,7 +73,7 @@ func (p *Parser) Parse(r io.Reader) error {
 	_ = flags
 	extension := make([]byte, extensionSize)
 	if _, err := io.ReadFull(r, extension); err != nil {
-		return errors.Wrap(err, "can't read header extension")
+		return fmt.Errorf("can't read header extension: %w", err)
 	}
 
 	for {
@@ -93,7 +93,7 @@ func (p *Parser) Parse(r io.Reader) error {
 			}
 			row[i] = make([]byte, colLen)
 			if _, err := io.ReadFull(r, row[i]); err != nil {
-				return errors.Wrap(err, "can't read column")
+				return fmt.Errorf("can't read column: %w", err)
 			}
 		}
 		p.ch <- row
