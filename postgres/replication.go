@@ -238,8 +238,8 @@ func (db *Database) HandleLogical(ctx context.Context, lsn pglogrepl.LSN, msg pg
 		// Nice to have some lock, to have whole transaction in single ES batch
 		// d.results <- Document{LSN: lsn}
 
-	// This message is delivered at the bedinning, and after table schema canges.
-	// TODO: support droped columns
+	// This message is delivered at the beginning, and after table schema changes.
+	// TODO: support dropped columns
 	case *pglogrepl.RelationMessage:
 		table := db.schema(v.Namespace).table(v.RelationName)
 		table.SetRelationID(v.RelationID)
@@ -278,23 +278,43 @@ func (db *Database) HandleLogical(ctx context.Context, lsn pglogrepl.LSN, msg pg
 	case *pglogrepl.UpdateMessage:
 		table := db.relation(v.RelationID)
 		metricMessages.WithLabelValues("update", table.name).Inc()
-		// TODO: If PK or Routing field was changed, proceed with delete & insert pair, including inlines
-		// recreate := !table.upsertOnly && v.OldTuple != nil && table.tupleKeysChanged(v.OldTuple, v.NewTuple)
 
-		action := ESUpdate
-		if table.index && !table.upsertOnly && v.OldTuple != nil && table.tupleKeysChanged(v.OldTuple, v.NewTuple) {
+		// IF document keys (_id, _routing) changed, we can't update it, thus it needs to be re-created.
+
+		insert := false
+		if !table.upsertOnly {
 			table.decodeTuple(v.OldTuple)
-			meta := must(table.elasticBulkHeader(ESDelete))
-			db.stream.add(Document{Position: pos, Meta: meta})
-			action = ESIndex
+
+			if table.index && table.tupleKeysChanged(v.OldTuple, v.NewTuple) {
+				insert = true // new document would be inserted
+				// but we need to delete current document first
+				meta := must(table.elasticBulkHeader(ESDelete))
+				db.stream.add(Document{Position: pos, Meta: meta})
+			}
+
+			// Clean up old inlines
+			for _, inl := range table.isInlinedIn {
+				if inl.tupleKeysChanged(v.OldTuple, v.NewTuple) {
+					meta := must(inl.elasticBulkHeader(ESUpdate))
+					data := must(inl.jsonDelScript())
+					db.stream.add(Document{Position: pos, Meta: meta, Data: data})
+				}
+			}
 		}
 
 		table.decodeTuple(v.NewTuple)
-		// XXX: ESUpdate is correct here, and would work fine assuming that data is consistent.
+
 		if table.index {
-			meta := must(table.elasticBulkHeader(action))
-			data := must(table.EncodeUpdateRowJSON())
-			db.stream.add(Document{Position: pos, Meta: meta, Data: data})
+			if insert { // create new document, since we deleted previous
+				meta := must(table.elasticBulkHeader(ESInsert))
+				data := must(table.MarshalJSON())
+				db.stream.add(Document{Position: pos, Meta: meta, Data: data})
+			} else { // update existing
+				// XXX: ESUpdate is correct here, and would work fine assuming that data is consistent.
+				meta := must(table.elasticBulkHeader(ESUpdate))
+				data := must(table.EncodeUpdateRowJSON())
+				db.stream.add(Document{Position: pos, Meta: meta, Data: data})
+			}
 		}
 
 		for _, inl := range table.isInlinedIn {
