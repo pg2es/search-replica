@@ -18,6 +18,7 @@ import (
 )
 
 const outputPlugin = "pgoutput" // important
+const defaultApplicationName = "PG2ES/SearchReplica"
 
 var (
 	metricMessages = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -50,6 +51,7 @@ func (db *Database) Connect(ctx context.Context) error {
 	}
 	db.name = config.Database // By default database name == index name
 
+	config.RuntimeParams["application_name"] = defaultApplicationName
 	config.RuntimeParams["options"] = "-c statement_timeout=0" // Equivalent of `SET statement_timeout=0;`
 
 	// "replication" key should not be defined for regular (query) connection.
