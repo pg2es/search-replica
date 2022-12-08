@@ -50,6 +50,8 @@ func (db *Database) Connect(ctx context.Context) error {
 	}
 	db.name = config.Database // By default database name == index name
 
+	config.RuntimeParams["options"] = "-c statement_timeout=0" // Equivalent of `SET statement_timeout=0;`
+
 	// "replication" key should not be defined for regular (query) connection.
 	// this connection is required for config and type discovery.
 	// In replication mode, only the simple query protocol can be used, which is not sufficient in this case.

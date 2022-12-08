@@ -18,6 +18,8 @@ services:
       - "postgres"
       - "-c"
       - "wal_level=logical"
+      - "-c"
+      - "statement_timeout=200ms" # SR must disable it.
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./data/:/data/:ro
@@ -112,7 +114,7 @@ services:
       SEARCH_PUSH_DEBOUNCE: 250ms
       LOG_LEVEL: "debug"
       LOG_FORMAT: "cli"
-    entrypoint: ["/bin/pg2es", "-recreate", "-reindex"]
+    entrypoint: ["/bin/pg2es", "-reindex"]
 
 volumes:
   elasticsearch-data:
