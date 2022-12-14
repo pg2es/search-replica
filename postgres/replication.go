@@ -284,11 +284,11 @@ func (db *Database) HandleLogical(ctx context.Context, lsn pglogrepl.LSN, msg pg
 		metricMessages.WithLabelValues("update", table.name).Inc()
 
 		// IF document keys (_id, _routing) changed, we can't update it, thus it needs to be re-created.
-
 		insert := false
-		if !table.upsertOnly {
+		if !table.upsertOnly && v.OldTuple != nil {
 			table.decodeTuple(v.OldTuple)
 
+			// cleanup main document
 			if table.index && table.tupleKeysChanged(v.OldTuple, v.NewTuple) {
 				insert = true // new document would be inserted
 				// but we need to delete current document first
